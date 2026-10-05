@@ -86,10 +86,11 @@
 
         function volumeTemplate(volume = {}) {
             const capacity = Number(volume.capacity || 0) / (1024 ** 3);
+            const displayedCapacity = Number.isFinite(capacity) ? Number(capacity.toFixed(3)) : 0;
             return `<div class="volume">
                 <input type="hidden" data-field="id" value="${escapeHtml(volume.id || makeId())}">
                 <div class="field"><label>Mount point</label><input data-field="mountPoint" value="${escapeHtml(volume.mountPoint)}" placeholder="E:\\ or /mnt/media" required></div>
-                <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.1" value="${Number.isFinite(capacity) ? capacity : 0}"><span>GiB</span></div></div>
+                <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.001" value="${displayedCapacity}"><span>GiB</span></div></div>
                 <button class="remove" data-action="remove-volume" type="button">Remove</button>
             </div>`;
         }
