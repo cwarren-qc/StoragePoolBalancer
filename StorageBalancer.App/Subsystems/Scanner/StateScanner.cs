@@ -7,21 +7,26 @@ using System.Threading;
 using System.Threading.Tasks;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Domain;
+using StorageBalancer.App.Subsystems.Storage;
 
 namespace StorageBalancer.App.Subsystems.Scanner;
 
 public class StateScanner
 {
     private readonly int _blockSize;
+    private readonly JsonStateRepository _stateRepository;
     private readonly ConcurrentDictionary<string, DiskScanProgress> _diskProgress = new();
     private readonly object _statusLock = new();
     private bool _isScanning;
     private CancellationTokenSource? _scanCancellation;
     private DateTime? _scannedAt;
     private string? _error;
+    private string? _snapshotName;
+    private string? _snapshotPath;
 
-    public StateScanner(int blockSize = 4096)
+    public StateScanner(JsonStateRepository stateRepository, int blockSize = 4096)
     {
+        _stateRepository = stateRepository;
         _blockSize = blockSize;
     }
 
@@ -34,11 +39,13 @@ public class StateScanner
                 _scanCancellation?.IsCancellationRequested ?? false,
                 _scannedAt,
                 _error,
+                _snapshotName,
+                _snapshotPath,
                 _diskProgress.Values.OrderBy(disk => disk.HardwareName).ToArray());
         }
     }
 
-    public bool TryStartScan(AppConfig config)
+    public bool TryStartScan(AppConfig config, string snapshotName, string snapshotPath)
     {
         lock (_statusLock)
         {
@@ -49,6 +56,8 @@ public class StateScanner
             _scanCancellation = new CancellationTokenSource();
             _scannedAt = null;
             _error = null;
+            _snapshotName = snapshotName;
+            _snapshotPath = snapshotPath;
             _diskProgress.Clear();
 
             foreach (var disk in config.Disks)
@@ -58,7 +67,7 @@ public class StateScanner
             }
         }
 
-        _ = RunScanAsync(config, _scanCancellation);
+        _ = RunScanAsync(config, _scanCancellation, snapshotName, snapshotPath);
         return true;
     }
 
@@ -74,19 +83,21 @@ public class StateScanner
         }
     }
 
-    private async Task RunScanAsync(AppConfig config, CancellationTokenSource cancellation)
+    private async Task RunScanAsync(AppConfig config, CancellationTokenSource cancellation, string snapshotName, string snapshotPath)
     {
         var cancellationToken = cancellation.Token;
         try
         {
             var diskScanTasks = config.Disks.Select(diskConfig => Task.Run(
                 () => ScanPhysicalDisk(diskConfig, config.DrivePoolMode, cancellationToken), cancellationToken));
-            await Task.WhenAll(diskScanTasks);
+            var scannedDisks = await Task.WhenAll(diskScanTasks);
+            var snapshot = new PoolSnapshot(DateTime.UtcNow, scannedDisks.ToImmutableList());
+            _stateRepository.SaveSnapshot(snapshot, snapshotPath);
 
             lock (_statusLock)
             {
                 _isScanning = false;
-                _scannedAt = DateTime.UtcNow;
+                _scannedAt = snapshot.ScannedAt;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -261,7 +272,14 @@ public class StateScanner
     }
 }
 
-public record ScanStatus(bool IsScanning, bool IsCancellationRequested, DateTime? ScannedAt, string? Error, IReadOnlyCollection<DiskScanProgress> Disks);
+public record ScanStatus(
+    bool IsScanning,
+    bool IsCancellationRequested,
+    DateTime? ScannedAt,
+    string? Error,
+    string? SnapshotName,
+    string? SnapshotPath,
+    IReadOnlyCollection<DiskScanProgress> Disks);
 
 public record DiskScanProgress(
     string Id,

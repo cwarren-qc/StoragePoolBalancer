@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "StorageBalancer.App",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "${workspaceFolder}/StorageBalancer.App/bin/Debug/net8.0/StorageBalancer.App.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "stopAtEntry": false,
+            "console": "integratedTerminal",
+            "serverReadyAction": {
+                "action": "openExternally",
+                "pattern": "Now listening on: (https?://\\S+)",
+                "uriFormat": "%s"
+            },
+            "env": {
+                "CONFIG_FOLDER": "${workspaceFolder}/../StoragePoolBalancer.TestEnv/config",
+                "ASPNETCORE_CONTENTROOT": "${workspaceFolder}/StorageBalancer.App"
+            }
+        }
+    ]
+}

@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
@@ -22,14 +23,23 @@ public class PhysicalDiskConfig
 public class AppConfig
 {
     public bool DrivePoolMode { get; set; }
+    public string? SnapshotsFolder { get; set; }
     public List<PhysicalDiskConfig> Disks { get; set; } = new();
     // We will add rules here later
 }
 
 public class ConfigManager
 {
-    private readonly string _configPath = "config.json";
+    private readonly string _configPath;
     private readonly JsonSerializerOptions _options = new() { WriteIndented = true };
+
+    public ConfigManager()
+    {
+        var configuredFolder = Environment.GetEnvironmentVariable("CONFIG_FOLDER");
+        _configPath = string.IsNullOrWhiteSpace(configuredFolder)
+            ? Path.GetFullPath("config.json")
+            : Path.Combine(Path.GetFullPath(configuredFolder), "config.json");
+    }
 
     public AppConfig Load()
     {
@@ -42,6 +52,7 @@ public class ConfigManager
 
     public void Save(AppConfig config)
     {
+        Directory.CreateDirectory(Path.GetDirectoryName(_configPath)!);
         var json = JsonSerializer.Serialize(config, _options);
         File.WriteAllText(_configPath, json);
     }

@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Immutable;
+using System.Text.Json.Serialization;
 
 namespace StorageBalancer.App.Domain;
 
 // The base abstraction for any file system item
+[JsonPolymorphic(TypeDiscriminatorPropertyName = "$nodeType")]
+[JsonDerivedType(typeof(FileNode), "file")]
+[JsonDerivedType(typeof(FolderNode), "folder")]
 public abstract record FileSystemNode(string Name, string RelativePath, long Size, long SizeOnDisk);
 
 // Represents a single file

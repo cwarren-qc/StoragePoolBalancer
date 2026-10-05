@@ -1,40 +1,47 @@
 using System.IO;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using StorageBalancer.App.Domain;
 
 namespace StorageBalancer.App.Subsystems.Storage;
 
 public class JsonStateRepository
 {
-    private readonly string _filePath;
     private readonly JsonSerializerOptions _jsonOptions;
 
-    public JsonStateRepository(string filePath)
+    public JsonStateRepository()
     {
-        _filePath = filePath;
-
         _jsonOptions = new JsonSerializerOptions
         {
-            WriteIndented = true,
-            // Required to properly serialize/deserialize the abstract FileSystemNode hierarchy
-            Converters = { new JsonStringEnumConverter() }
+            WriteIndented = true
         };
     }
 
-    public void SaveSnapshot(PoolSnapshot snapshot)
+    public void SaveSnapshot(PoolSnapshot snapshot, string filePath)
     {
-        // Because the tree can be large, we use a FileStream directly to avoid memory spikes
-        using var stream = File.Create(_filePath);
-        JsonSerializer.Serialize(stream, snapshot, _jsonOptions);
+        var directory = Path.GetDirectoryName(filePath) ?? throw new ArgumentException("Snapshot path must include a directory.", nameof(filePath));
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(directory, $".{Path.GetFileName(filePath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                JsonSerializer.Serialize(stream, snapshot, _jsonOptions);
+
+            File.Move(temporaryPath, filePath);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+                File.Delete(temporaryPath);
+        }
     }
 
-    public PoolSnapshot? LoadSnapshot()
+    public PoolSnapshot? LoadSnapshot(string filePath)
     {
-        if (!File.Exists(_filePath))
+        if (!File.Exists(filePath))
             return null;
 
-        using var stream = File.OpenRead(_filePath);
+        using var stream = File.OpenRead(filePath);
         return JsonSerializer.Deserialize<PoolSnapshot>(stream, _jsonOptions);
     }
 }

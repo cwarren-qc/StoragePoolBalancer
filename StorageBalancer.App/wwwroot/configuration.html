@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Configuration | Pool Survey</title>
+    <style>
+        :root { color-scheme: light; --ink:#1b2724; --muted:#687772; --paper:#f4f5ef; --surface:#fffefa; --line:#d9dfd5; --green:#286b56; --deep:#1d4d3e; --orange:#b65b38; }
+        * { box-sizing:border-box; }
+        body { margin:0; color:var(--ink); background:var(--paper); font-family:"Segoe UI Variable","Segoe UI",sans-serif; }
+        button,input { font:inherit; }
+        button { cursor:pointer; }
+        .shell { width:min(1050px,calc(100% - 36px)); margin:0 auto; }
+        header { display:flex; justify-content:space-between; align-items:center; padding:20px 0; border-bottom:1px solid var(--line); }
+        .brand { color:var(--ink); text-decoration:none; font-size:14px; font-weight:750; }
+        .back { color:var(--green); font-size:13px; font-weight:650; text-decoration:none; }
+        main { padding:34px 0 60px; }
+        .eyebrow { color:var(--green); font-size:11px; font-weight:800; text-transform:uppercase; }
+        h1 { margin:6px 0 4px; font-size:29px; }
+        h2 { margin:0; font-size:17px; }
+        .intro,.sub { color:var(--muted); font-size:13px; }
+        .intro { margin:0 0 25px; }
+        .section-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:24px 0 12px; }
+        .section-head p { margin:4px 0 0; color:var(--muted); font-size:12px; }
+        .button { min-height:38px; padding:0 13px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--ink); font-size:13px; font-weight:650; }
+        .button:hover { border-color:#9daea3; }
+        .primary { color:white; border-color:var(--green); background:var(--green); }
+        .primary:hover { background:var(--deep); }
+        .button:disabled { opacity:.55; cursor:wait; }
+        .panel { padding:17px 18px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
+        .mode { display:flex; align-items:center; gap:9px; font-size:13px; font-weight:650; }
+        input[type=checkbox] { width:16px; height:16px; accent-color:var(--green); }
+        .field { display:grid; gap:5px; }
+        .field label { color:var(--muted); font-size:11px; font-weight:700; }
+        .field input { width:100%; min-height:36px; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; outline:none; }
+        .field input:focus { border-color:var(--green); box-shadow:0 0 0 3px rgb(40 107 86 / 12%); }
+        .disk-list { display:grid; gap:10px; }
+        .disk { padding:16px 18px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
+        .disk-head,.volume-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+        .disk-head { margin-bottom:14px; }
+        .disk-title { font-size:13px; font-weight:750; }
+        .fields { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(240px,1.3fr); gap:12px; }
+        .volumes { margin-top:16px; padding-top:10px; border-top:1px solid var(--line); }
+        .volume-head { margin-bottom:7px; font-size:12px; font-weight:700; }
+        .volume { display:grid; grid-template-columns:minmax(190px,1fr) minmax(120px,190px) auto; align-items:end; gap:10px; padding:6px 0; }
+        .unit { position:relative; }
+        .unit input { padding-right:40px; }
+        .unit span { position:absolute; top:10px; right:9px; color:var(--muted); font-size:11px; }
+        .remove { min-height:34px; padding:0 8px; border:0; background:transparent; color:var(--orange); font-size:12px; font-weight:650; }
+        .subtle { min-height:32px; padding:0 10px; font-size:12px; }
+        .empty { padding:22px; color:var(--muted); border:1px dashed #bfcabe; border-radius:7px; font-size:13px; }
+        .notice { min-height:20px; margin-top:10px; color:var(--muted); font-size:12px; }
+        .notice.error { color:#a43f2a; }
+        .actions { display:flex; justify-content:space-between; gap:12px; margin-top:18px; }
+        @media(max-width:650px) { .shell{width:calc(100% - 26px)} .fields{grid-template-columns:1fr} .volume{grid-template-columns:minmax(0,1fr) minmax(105px,.7fr)} .volume .remove{grid-column:2;justify-self:end;min-height:25px} .section-head{align-items:flex-start} }
+    </style>
+</head>
+<body>
+    <header class="shell"><a class="brand" href="/">Pool Survey</a><a class="back" href="/">Back to overview</a></header>
+    <main class="shell">
+        <div class="eyebrow">Settings</div>
+        <h1>Configuration</h1>
+        <p class="intro">Set the pool mode, snapshot destination, and physical disk volumes.</p>
+
+        <section class="panel">
+            <div class="field"><label for="snapshots-folder">Snapshots folder</label><input id="snapshots-folder" placeholder="Enter a folder path" required></div>
+            <p class="sub">Relative paths are resolved from the application folder. Absolute paths are also accepted.</p>
+            <label class="mode"><input id="drive-pool-mode" type="checkbox"> DrivePool mode</label>
+        </section>
+
+        <section>
+            <div class="section-head">
+                <div><h2>Physical disks</h2><p>Volumes on each physical disk are scanned sequentially.</p></div>
+                <button class="button" id="add-disk" type="button">+ Add disk</button>
+            </div>
+            <div class="disk-list" id="disk-list"></div>
+            <div class="notice" id="notice" role="status" aria-live="polite"></div>
+            <div class="actions"><a class="back" href="/">Cancel</a><button class="button primary" id="save" type="button">Save configuration</button></div>
+        </section>
+    </main>
+    <script>
+        const diskList = document.getElementById('disk-list');
+        const notice = document.getElementById('notice');
+        const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[character]);
+        const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        function volumeTemplate(volume = {}) {
+            const capacity = Number(volume.capacity || 0) / (1024 ** 3);
+            return `<div class="volume">
+                <input type="hidden" data-field="id" value="${escapeHtml(volume.id || makeId())}">
+                <div class="field"><label>Mount point</label><input data-field="mountPoint" value="${escapeHtml(volume.mountPoint)}" placeholder="E:\\ or /mnt/media" required></div>
+                <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.1" value="${Number.isFinite(capacity) ? capacity : 0}"><span>GiB</span></div></div>
+                <button class="remove" data-action="remove-volume" type="button">Remove</button>
+            </div>`;
+        }
+
+        function diskTemplate(disk = {}, index = 0) {
+            const volumes = disk.volumes?.length ? disk.volumes : [{ id:makeId(), mountPoint:'', capacity:0 }];
+            return `<article class="disk" data-disk>
+                <input type="hidden" data-field="id" value="${escapeHtml(disk.id || makeId())}">
+                <div class="disk-head"><div class="disk-title">Physical disk ${index + 1}</div><button class="remove" data-action="remove-disk" type="button">Remove disk</button></div>
+                <div class="fields">
+                    <div class="field"><label>Disk name</label><input data-field="hardwareName" value="${escapeHtml(disk.hardwareName)}" placeholder="Media disk 1" required></div>
+                    <div class="field"><label>Notes or hardware identifier</label><input data-field="description" value="${escapeHtml(disk.description)}" placeholder="Optional"></div>
+                </div>
+                <div class="volumes"><div class="volume-head"><span>Volumes</span><button class="button subtle" data-action="add-volume" type="button">+ Add volume</button></div><div data-volumes>${volumes.map(volumeTemplate).join('')}</div></div>
+            </article>`;
+        }
+
+        function render(config) {
+            const disks = config.disks || [];
+            diskList.innerHTML = disks.length ? disks.map(diskTemplate).join('') : '<div class="empty">No disks configured.</div>';
+            document.getElementById('snapshots-folder').value = config.snapshotsFolder || '';
+            document.getElementById('drive-pool-mode').checked = Boolean(config.drivePoolMode);
+        }
+
+        async function request(url, options) {
+            const response = await fetch(url, options);
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+            return data;
+        }
+
+        async function load() {
+            try { render(await request('/api/config')); notice.textContent = 'Configuration loaded.'; }
+            catch (error) { notice.textContent = error.message; notice.classList.add('error'); }
+        }
+
+        function collect() {
+            const disks = [...diskList.querySelectorAll('[data-disk]')].map(element => {
+                const field = name => element.querySelector(`[data-field="${name}"]`).value;
+                const volumes = [...element.querySelectorAll('.volume')].map(volume => {
+                    const value = name => volume.querySelector(`[data-field="${name}"]`).value;
+                    const capacity = Number(value('capacity'));
+                    if (!Number.isFinite(capacity) || capacity < 0) throw new Error('Volume capacity must be zero or greater.');
+                    return { id:value('id'), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)) };
+                });
+                return { id:field('id'), hardwareName:field('hardwareName').trim(), description:field('description').trim(), volumes };
+            });
+            if (disks.some(disk => !disk.hardwareName || !disk.volumes.length || disk.volumes.some(volume => !volume.mountPoint)))
+                throw new Error('Enter a disk name and at least one mounted volume for each disk.');
+            const snapshotsFolder = document.getElementById('snapshots-folder').value.trim();
+            if (!snapshotsFolder) throw new Error('Choose a snapshots folder.');
+            return { drivePoolMode:document.getElementById('drive-pool-mode').checked, snapshotsFolder, disks };
+        }
+
+        async function save() {
+            try {
+                await request('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collect()) });
+                notice.classList.remove('error');
+                notice.textContent = 'Configuration saved.';
+            } catch (error) {
+                notice.textContent = error.message;
+                notice.classList.add('error');
+            }
+        }
+
+        diskList.addEventListener('click', event => {
+            const button = event.target.closest('[data-action]');
+            if (!button) return;
+            const disk = button.closest('[data-disk]');
+            if (button.dataset.action === 'remove-disk') disk.remove();
+            if (button.dataset.action === 'add-volume') disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate());
+            if (button.dataset.action === 'remove-volume') button.closest('.volume').remove();
+            if (!diskList.querySelector('[data-disk]')) diskList.innerHTML = '<div class="empty">No disks configured.</div>';
+            [...diskList.querySelectorAll('.disk-title')].forEach((title, index) => title.textContent = `Physical disk ${index + 1}`);
+        });
+        document.getElementById('add-disk').addEventListener('click', () => {
+            if (diskList.querySelector('.empty')) diskList.innerHTML = '';
+            diskList.insertAdjacentHTML('beforeend', diskTemplate({ id:makeId(), hardwareName:'', volumes:[] }, diskList.querySelectorAll('[data-disk]').length));
+        });
+        document.getElementById('save').addEventListener('click', save);
+        load();
+    </script>
+</body>
+</html>

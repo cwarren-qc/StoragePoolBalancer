@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using StorageBalancer.App.Subsystems.Storage;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Subsystems.Scanner;
 
@@ -7,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Register our services as Singletons (they live for the lifetime of the app)
 builder.Services.AddSingleton<ConfigManager>();
+builder.Services.AddSingleton<JsonStateRepository>();
 builder.Services.AddSingleton<StateScanner>();
 
 // Add support for serving a Web UI (HTML/JS)
@@ -27,6 +29,9 @@ app.MapGet("/api/config", (ConfigManager configManager) =>
 // POST: /api/config -> Saves configuration from the UI
 app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
 {
+    if (string.IsNullOrWhiteSpace(newConfig.SnapshotsFolder))
+        return Results.BadRequest(new { Error = "Choose a snapshots folder." });
+
     if (newConfig.Disks is null || newConfig.Disks.Any(disk =>
         string.IsNullOrWhiteSpace(disk.Id) ||
         string.IsNullOrWhiteSpace(disk.HardwareName) ||
@@ -51,14 +56,40 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
 });
 
 // POST: /api/scan -> Starts a multithreaded scan; progress is available from /api/scan/status
-app.MapPost("/api/scan", (ConfigManager configManager, StateScanner scanner) =>
+app.MapPost("/api/scan", (ScanStartRequest? request, ConfigManager configManager, StateScanner scanner, IWebHostEnvironment environment) =>
 {
     var config = configManager.Load();
+
+    if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
+        return Results.BadRequest(new { Error = "Snapshots folder is not configured. Set it on the Configuration page before starting a scan." });
 
     if (config.Disks.Count == 0)
         return Results.BadRequest(new { Error = "Add at least one physical disk before scanning." });
 
-    if (!scanner.TryStartScan(config))
+    var snapshotName = string.IsNullOrWhiteSpace(request?.SnapshotName)
+        ? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")
+        : request.SnapshotName.Trim();
+    if (snapshotName.Length > 120 || snapshotName is "." or ".." || snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        return Results.BadRequest(new { Error = "Use a snapshot name of 120 characters or fewer without filename-invalid characters." });
+
+    string snapshotPath;
+    try
+    {
+        var configuredFolder = config.SnapshotsFolder.Trim();
+        var snapshotFolder = Path.IsPathRooted(configuredFolder)
+            ? configuredFolder
+            : Path.Combine(environment.ContentRootPath, configuredFolder);
+        snapshotPath = Path.Combine(Path.GetFullPath(snapshotFolder), $"{snapshotName}.json");
+    }
+    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+    {
+        return Results.BadRequest(new { Error = "The configured snapshots folder is not a valid path." });
+    }
+
+    if (File.Exists(snapshotPath))
+        return Results.Conflict(new { Error = $"A snapshot named '{snapshotName}' already exists." });
+
+    if (!scanner.TryStartScan(config, snapshotName, snapshotPath))
         return Results.Conflict(new { Error = "A scan is already running." });
 
     return Results.Accepted("/api/scan/status", scanner.GetStatus());
@@ -74,5 +105,7 @@ app.MapPost("/api/scan/cancel", (StateScanner scanner) =>
     return Results.Accepted("/api/scan/status", scanner.GetStatus());
 });
 
-// Start the Web Server on port 5000
-app.Run("http://localhost:5000");
+// Default to port 5000 while allowing standard ASP.NET Core URL overrides.
+app.Run(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:5000");
+
+public record ScanStartRequest(string? SnapshotName);
