@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
@@ -63,7 +64,16 @@ public class StateScanner
             foreach (var disk in config.Disks)
             {
                 _diskProgress[disk.Id] = new DiskScanProgress(
-                    disk.Id, disk.HardwareName, "Queued", string.Empty, 0, 0, 0, null);
+                    disk.Id,
+                    disk.HardwareName,
+                    "Queued",
+                    string.Empty,
+                    0,
+                    0,
+                    0,
+                    null,
+                    null,
+                    ImmutableList<DiskScanIssue>.Empty);
             }
         }
 
@@ -91,7 +101,12 @@ public class StateScanner
             var diskScanTasks = config.Disks.Select(diskConfig => Task.Run(
                 () => ScanPhysicalDisk(diskConfig, config.DrivePoolMode, cancellationToken), cancellationToken));
             var scannedDisks = await Task.WhenAll(diskScanTasks);
-            var snapshot = new PoolSnapshot(DateTime.UtcNow, scannedDisks.ToImmutableList());
+            var snapshot = new PoolSnapshot(
+                1,
+                DateTime.UtcNow,
+                config.DrivePoolMode,
+                _blockSize,
+                scannedDisks.ToImmutableList());
             _stateRepository.SaveSnapshot(snapshot, snapshotPath);
 
             lock (_statusLock)
@@ -140,33 +155,75 @@ public class StateScanner
         }
     }
 
-    private PhysicalDisk ScanPhysicalDisk(PhysicalDiskConfig diskConfig, bool drivePoolMode, CancellationToken cancellationToken)
+    private SnapshotDisk ScanPhysicalDisk(PhysicalDiskConfig diskConfig, bool drivePoolMode, CancellationToken cancellationToken)
     {
         Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Starting Disk: {diskConfig.HardwareName}");
         UpdateProgress(diskConfig.Id, progress => progress with { Status = "Scanning" });
 
-        var volumes = ImmutableList.CreateBuilder<Volume>();
+        var volumes = ImmutableList.CreateBuilder<SnapshotVolume>();
 
         // Scan volumes SEQUENTIALLY to prevent disk head thrashing
         foreach (var volConfig in diskConfig.Volumes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var volumeRoot = new DirectoryInfo(volConfig.MountPoint);
-            var scanRoot = drivePoolMode ? FindPoolPartRoot(diskConfig.Id, volumeRoot, cancellationToken) : volumeRoot;
-            if (scanRoot is null)
-                continue;
+            UpdateProgress(diskConfig.Id, progress => progress with { CurrentVolumeMountPoint = volConfig.MountPoint });
+            var issues = new List<SnapshotIssue>();
+            DirectoryInfo? scanRoot = null;
+            var folders = new SortedDictionary<string, List<SnapshotFile>>(StringComparer.Ordinal);
+            long otherItemsSizeOnDisk = 0;
+            var rootWasFound = false;
 
-            Console.WriteLine($"  -> Scanning Volume: {scanRoot.FullName}");
-            var rootFolder = ScanDirectory(diskConfig.Id, scanRoot, "", cancellationToken);
-            volumes.Add(new Volume(volConfig.Id, volConfig.MountPoint, volConfig.Capacity, rootFolder));
+            try
+            {
+                var volumeRoot = new DirectoryInfo(volConfig.MountPoint);
+                scanRoot = drivePoolMode
+                    ? FindPoolPartRoot(diskConfig.Id, volumeRoot, issues, cancellationToken)
+                    : ResolveConfiguredRoot(diskConfig.Id, volumeRoot, volConfig.RootFolderRelativePath, issues);
+
+                Console.WriteLine($"  -> Scanning Volume: {volumeRoot.FullName}");
+                otherItemsSizeOnDisk = ScanDirectory(
+                    diskConfig.Id,
+                    volumeRoot,
+                    scanRoot,
+                    folders,
+                    issues,
+                    cancellationToken,
+                    ref rootWasFound);
+
+                if (scanRoot is not null && !rootWasFound)
+                    AddIssue(diskConfig.Id, issues, scanRoot.FullName, "Configured root folder was not found during the volume scan.");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                AddIssue(diskConfig.Id, issues, volConfig.MountPoint, exception.Message);
+            }
+
+            volumes.Add(new SnapshotVolume(
+                volConfig.Id,
+                volConfig.MountPoint,
+                volConfig.Capacity,
+                otherItemsSizeOnDisk,
+                volConfig.RootFolderRelativePath ?? string.Empty,
+                scanRoot?.FullName,
+                scanRoot is not null && rootWasFound && issues.Count == 0,
+                issues.ToImmutableList(),
+                folders));
         }
 
         Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Finished Disk: {diskConfig.HardwareName}");
         UpdateProgress(diskConfig.Id, progress => progress with { Status = "Complete", CurrentPath = string.Empty });
-        return new PhysicalDisk(diskConfig.Id, diskConfig.HardwareName, volumes.ToImmutable());
+        return new SnapshotDisk(diskConfig.Id, diskConfig.HardwareName, diskConfig.Description, volumes.ToImmutable());
     }
 
-    private DirectoryInfo? FindPoolPartRoot(string diskId, DirectoryInfo volumeRoot, CancellationToken cancellationToken)
+    private DirectoryInfo? FindPoolPartRoot(
+        string diskId,
+        DirectoryInfo volumeRoot,
+        List<SnapshotIssue> issues,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -178,11 +235,7 @@ public class StateScanner
             var message = matches.Length == 0
                 ? "No PoolPart.* directory was found."
                 : "More than one PoolPart.* directory was found; select a volume with exactly one pool folder.";
-            UpdateProgress(diskId, progress => progress with
-            {
-                CurrentPath = volumeRoot.FullName,
-                Error = string.IsNullOrEmpty(progress.Error) ? message : $"{progress.Error}; {message}"
-            });
+            AddIssue(diskId, issues, volumeRoot.FullName, message);
             return null;
         }
         catch (OperationCanceledException)
@@ -191,59 +244,140 @@ public class StateScanner
         }
         catch (Exception exception)
         {
-            UpdateProgress(diskId, progress => progress with
-            {
-                CurrentPath = volumeRoot.FullName,
-                Error = string.IsNullOrEmpty(progress.Error) ? exception.Message : $"{progress.Error}; {exception.Message}"
-            });
+            AddIssue(diskId, issues, volumeRoot.FullName, exception.Message);
             return null;
         }
     }
 
-    private FolderNode ScanDirectory(string diskId, DirectoryInfo dirInfo, string relativePath, CancellationToken cancellationToken)
+    private DirectoryInfo? ResolveConfiguredRoot(
+        string diskId,
+        DirectoryInfo volumeRoot,
+        string? configuredRoot,
+        List<SnapshotIssue> issues)
+    {
+        try
+        {
+            var fullVolumePath = Path.GetFullPath(volumeRoot.FullName);
+            var fullRootPath = Path.GetFullPath(Path.Combine(fullVolumePath, configuredRoot ?? string.Empty));
+            var relativePath = Path.GetRelativePath(fullVolumePath, fullRootPath);
+            if (Path.IsPathRooted(relativePath) || relativePath == ".." || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                AddIssue(diskId, issues, fullRootPath, "Configured root folder must be inside its volume.");
+                return null;
+            }
+
+            return new DirectoryInfo(fullRootPath);
+        }
+        catch (Exception exception)
+        {
+            AddIssue(diskId, issues, volumeRoot.FullName, exception.Message);
+            return null;
+        }
+    }
+
+    private long ScanDirectory(
+        string diskId,
+        DirectoryInfo dirInfo,
+        DirectoryInfo? selectedRoot,
+        SortedDictionary<string, List<SnapshotFile>> folders,
+        List<SnapshotIssue> issues,
+        CancellationToken cancellationToken,
+        ref bool rootWasFound)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var children = ImmutableList.CreateBuilder<FileSystemNode>();
-        long totalSize = 0;
-        long totalSizeOnDisk = 0;
+        var insideSelectedRoot = selectedRoot is not null && IsSameOrDescendant(dirInfo.FullName, selectedRoot.FullName);
+        var isSelectedRoot = selectedRoot is not null && IsSamePath(dirInfo.FullName, selectedRoot.FullName);
+        var files = insideSelectedRoot ? new List<SnapshotFile>() : null;
+        if (files is not null)
+        {
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(selectedRoot!.FullName, dirInfo.FullName));
+            folders.Add(relativePath, files);
+            if (isSelectedRoot)
+                rootWasFound = true;
+        }
+
         UpdateProgress(diskId, progress => progress with
         {
             CurrentPath = dirInfo.FullName,
             FoldersScanned = progress.FoldersScanned + 1
         });
+        long otherSizeOnDisk = 0;
 
         try
         {
-            if (dirInfo.Exists)
+            if (!dirInfo.Exists)
             {
-                foreach (var fileSystemInfo in dirInfo.EnumerateFileSystemInfos())
+                AddIssue(diskId, issues, dirInfo.FullName, "Folder does not exist or is not accessible.");
+                return 0;
+            }
+
+            otherSizeOnDisk = files is null ? GetFolderSizeOnDisk() : 0;
+            var entries = dirInfo.GetFileSystemInfos();
+            Array.Sort(entries, CompareFileSystemInfo);
+            foreach (var fileSystemInfo in entries)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    string childRelativePath = string.IsNullOrEmpty(relativePath) ? fileSystemInfo.Name : Path.Combine(relativePath, fileSystemInfo.Name);
+                    if ((fileSystemInfo.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        if (fileSystemInfo is DirectoryInfo reparseDirectory &&
+                            selectedRoot is not null &&
+                            IsSamePath(reparseDirectory.FullName, selectedRoot.FullName))
+                        {
+                            otherSizeOnDisk += ScanDirectory(
+                                diskId,
+                                reparseDirectory,
+                                selectedRoot,
+                                folders,
+                                issues,
+                                cancellationToken,
+                                ref rootWasFound);
+                            continue;
+                        }
+
+                        if (files is null && fileSystemInfo is DirectoryInfo)
+                            otherSizeOnDisk += GetFolderSizeOnDisk();
+                        AddIssue(diskId, issues, fileSystemInfo.FullName, "Reparse point was skipped.");
+                        continue;
+                    }
 
                     if (fileSystemInfo is FileInfo fileInfo)
                     {
-                        long sizeOnDisk = fileInfo.Length == 0 ? 0 : (fileInfo.Length % _blockSize == 0 ? fileInfo.Length : (fileInfo.Length / _blockSize + 1) * _blockSize);
-                        children.Add(new FileNode(fileInfo.Name, childRelativePath, fileInfo.Length, sizeOnDisk));
-                        totalSize += fileInfo.Length;
-                        totalSizeOnDisk += sizeOnDisk;
+                        var size = fileInfo.Length;
+                        var sizeOnDisk = GetFileSizeOnDisk(size);
+                        if (files is not null)
+                            files.Add(new SnapshotFile(fileInfo.Name, size, sizeOnDisk));
+                        else
+                            otherSizeOnDisk += sizeOnDisk;
+
                         UpdateProgress(diskId, progress => progress with
                         {
                             CurrentPath = fileInfo.FullName,
                             FilesScanned = progress.FilesScanned + 1,
-                            BytesScanned = progress.BytesScanned + fileInfo.Length
+                            BytesScanned = progress.BytesScanned + size
                         });
                     }
                     else if (fileSystemInfo is DirectoryInfo subDirInfo)
                     {
-                        if ((subDirInfo.Attributes & FileAttributes.ReparsePoint) != 0)
-                            continue;
-
-                        var subFolder = ScanDirectory(diskId, subDirInfo, childRelativePath, cancellationToken);
-                        children.Add(subFolder);
-                        totalSize += subFolder.Size;
-                        totalSizeOnDisk += subFolder.SizeOnDisk;
+                        otherSizeOnDisk += ScanDirectory(
+                            diskId,
+                            subDirInfo,
+                            selectedRoot,
+                            folders,
+                            issues,
+                            cancellationToken,
+                            ref rootWasFound);
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception exception)
+                {
+                    AddIssue(diskId, issues, fileSystemInfo.FullName, exception.Message);
                 }
             }
         }
@@ -253,14 +387,69 @@ public class StateScanner
         }
         catch (Exception exception)
         {
-            UpdateProgress(diskId, progress => progress with
-            {
-                CurrentPath = dirInfo.FullName,
-                Error = string.IsNullOrEmpty(progress.Error) ? exception.Message : $"{progress.Error}; {exception.Message}"
-            });
+            AddIssue(diskId, issues, dirInfo.FullName, exception.Message);
         }
 
-        return new FolderNode(dirInfo.Name, relativePath, totalSize, totalSizeOnDisk, children.ToImmutable());
+        files?.Sort(CompareSnapshotFile);
+        return otherSizeOnDisk;
+    }
+
+    private long GetFileSizeOnDisk(long size)
+    {
+        return size == 0 ? 0 : (size % _blockSize == 0 ? size : (size / _blockSize + 1) * _blockSize);
+    }
+
+    private long GetFolderSizeOnDisk()
+    {
+        return _blockSize;
+    }
+
+    private static bool IsSameOrDescendant(string path, string root)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        var fullPath = Path.GetFullPath(path);
+        var fullRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        if (string.Equals(fullPath, fullRoot, comparison))
+            return true;
+
+        var rootPrefix = fullRoot.EndsWith(Path.DirectorySeparatorChar)
+            ? fullRoot
+            : fullRoot + Path.DirectorySeparatorChar;
+        return fullPath.StartsWith(rootPrefix, comparison);
+    }
+
+    private static bool IsSamePath(string left, string right)
+    {
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), comparison);
+    }
+
+    private static string NormalizeRelativePath(string path)
+    {
+        return path == "." ? "." : path.Replace(Path.DirectorySeparatorChar, '\\').Replace(Path.AltDirectorySeparatorChar, '\\');
+    }
+
+    private static int CompareFileSystemInfo(FileSystemInfo left, FileSystemInfo right)
+    {
+        var comparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
+        return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Name, right.Name);
+    }
+
+    private static int CompareSnapshotFile(SnapshotFile left, SnapshotFile right)
+    {
+        var comparison = StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
+        return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Name, right.Name);
+    }
+
+    private void AddIssue(string diskId, List<SnapshotIssue> issues, string path, string message)
+    {
+        issues.Add(new SnapshotIssue(path, message));
+        UpdateProgress(diskId, progress => progress with
+        {
+            CurrentPath = path,
+            Error = string.IsNullOrEmpty(progress.Error) ? message : $"{progress.Error}; {message}",
+            Issues = progress.Issues.Add(new DiskScanIssue(progress.CurrentVolumeMountPoint ?? string.Empty, path, message))
+        });
     }
 
     private void UpdateProgress(string diskId, Func<DiskScanProgress, DiskScanProgress> update)
@@ -289,4 +478,8 @@ public record DiskScanProgress(
     long FilesScanned,
     long FoldersScanned,
     long BytesScanned,
-    string? Error);
+    string? Error,
+    string? CurrentVolumeMountPoint,
+    ImmutableList<DiskScanIssue> Issues);
+
+public record DiskScanIssue(string VolumeMountPoint, string Path, string Message);

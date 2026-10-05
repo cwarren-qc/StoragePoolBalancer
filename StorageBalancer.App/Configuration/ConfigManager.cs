@@ -10,6 +10,7 @@ public class VolumeConfig
     public string Id { get; set; } = string.Empty;
     public string MountPoint { get; set; } = string.Empty;
     public long Capacity { get; set; }
+    public string RootFolderRelativePath { get; set; } = string.Empty;
 }
 
 public class PhysicalDiskConfig

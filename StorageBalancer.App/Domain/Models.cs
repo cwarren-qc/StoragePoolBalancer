@@ -1,49 +1,36 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Immutable;
-using System.Text.Json.Serialization;
 
 namespace StorageBalancer.App.Domain;
 
-// The base abstraction for any file system item
-[JsonPolymorphic(TypeDiscriminatorPropertyName = "$nodeType")]
-[JsonDerivedType(typeof(FileNode), "file")]
-[JsonDerivedType(typeof(FolderNode), "folder")]
-public abstract record FileSystemNode(string Name, string RelativePath, long Size, long SizeOnDisk);
+public record SnapshotFile(string Name, long Size, long SizeOnDisk);
 
-// Represents a single file
-public record FileNode(
-    string Name,
-    string RelativePath,
-    long Size,
-    long SizeOnDisk
-) : FileSystemNode(Name, RelativePath, Size, SizeOnDisk);
+public record SnapshotIssue(string Path, string Message);
 
-// Represents a folder, containing an immutable list of children (Files and sub-folders)
-public record FolderNode(
-    string Name,
-    string RelativePath,
-    long Size,
-    long SizeOnDisk,
-    ImmutableList<FileSystemNode> Children
-) : FileSystemNode(Name, RelativePath, Size, SizeOnDisk);
-
-// Represents a logical partition/volume
-public record Volume(
+public record SnapshotVolume(
     string Id,
     string MountPoint,
     long Capacity,
-    FolderNode RootFolder
+    long OtherItemsSizeOnDisk,
+    string ConfiguredRootFolder,
+    string? RootFolderPath,
+    bool IsComplete,
+    ImmutableList<SnapshotIssue> Issues,
+    SortedDictionary<string, List<SnapshotFile>> Folders
 );
 
-// Represents the actual hardware
-public record PhysicalDisk(
+public record SnapshotDisk(
     string Id,
     string HardwareName,
-    ImmutableList<Volume> Volumes
+    string Description,
+    ImmutableList<SnapshotVolume> Volumes
 );
 
-// The immutable snapshot of the entire system
 public record PoolSnapshot(
+    int SchemaVersion,
     DateTime ScannedAt,
-    ImmutableList<PhysicalDisk> Disks
+    bool DrivePoolMode,
+    int AllocationUnitSize,
+    ImmutableList<SnapshotDisk> Disks
 );

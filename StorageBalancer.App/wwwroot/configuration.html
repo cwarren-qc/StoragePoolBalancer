@@ -31,6 +31,7 @@
         .mode { display:flex; align-items:center; gap:9px; font-size:13px; font-weight:650; }
         input[type=checkbox] { width:16px; height:16px; accent-color:var(--green); }
         .field { display:grid; gap:5px; }
+        .root-folder-field[hidden] { display:none; }
         .field label { color:var(--muted); font-size:11px; font-weight:700; }
         .field input { width:100%; min-height:36px; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; outline:none; }
         .field input:focus { border-color:var(--green); box-shadow:0 0 0 3px rgb(40 107 86 / 12%); }
@@ -42,7 +43,7 @@
         .fields { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(240px,1.3fr); gap:12px; }
         .volumes { margin-top:16px; padding-top:10px; border-top:1px solid var(--line); }
         .volume-head { margin-bottom:7px; font-size:12px; font-weight:700; }
-        .volume { display:grid; grid-template-columns:minmax(190px,1fr) minmax(120px,190px) auto; align-items:end; gap:10px; padding:6px 0; }
+        .volume { display:grid; grid-template-columns:minmax(180px,1.1fr) minmax(150px,1fr) minmax(120px,.65fr) auto; align-items:end; gap:10px; padding:6px 0; }
         .unit { position:relative; }
         .unit input { padding-right:40px; }
         .unit span { position:absolute; top:10px; right:9px; color:var(--muted); font-size:11px; }
@@ -90,6 +91,7 @@
             return `<div class="volume">
                 <input type="hidden" data-field="id" value="${escapeHtml(volume.id || makeId())}">
                 <div class="field"><label>Mount point</label><input data-field="mountPoint" value="${escapeHtml(volume.mountPoint)}" placeholder="E:\\ or /mnt/media" required></div>
+                <div class="field root-folder-field"><label>Root folder (relative)</label><input data-field="rootFolderRelativePath" value="${escapeHtml(volume.rootFolderRelativePath)}" placeholder="Blank scans the volume root"></div>
                 <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.001" value="${displayedCapacity}"><span>GiB</span></div></div>
                 <button class="remove" data-action="remove-volume" type="button">Remove</button>
             </div>`;
@@ -113,6 +115,12 @@
             diskList.innerHTML = disks.length ? disks.map(diskTemplate).join('') : '<div class="empty">No disks configured.</div>';
             document.getElementById('snapshots-folder').value = config.snapshotsFolder || '';
             document.getElementById('drive-pool-mode').checked = Boolean(config.drivePoolMode);
+            syncRootFolderFields();
+        }
+
+        function syncRootFolderFields() {
+            const hidden = document.getElementById('drive-pool-mode').checked;
+            diskList.querySelectorAll('.root-folder-field').forEach(field => field.hidden = hidden);
         }
 
         async function request(url, options) {
@@ -134,7 +142,7 @@
                     const value = name => volume.querySelector(`[data-field="${name}"]`).value;
                     const capacity = Number(value('capacity'));
                     if (!Number.isFinite(capacity) || capacity < 0) throw new Error('Volume capacity must be zero or greater.');
-                    return { id:value('id'), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)) };
+                    return { id:value('id'), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)), rootFolderRelativePath:value('rootFolderRelativePath').trim() };
                 });
                 return { id:field('id'), hardwareName:field('hardwareName').trim(), description:field('description').trim(), volumes };
             });
@@ -161,7 +169,10 @@
             if (!button) return;
             const disk = button.closest('[data-disk]');
             if (button.dataset.action === 'remove-disk') disk.remove();
-            if (button.dataset.action === 'add-volume') disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate());
+            if (button.dataset.action === 'add-volume') {
+                disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate());
+                syncRootFolderFields();
+            }
             if (button.dataset.action === 'remove-volume') button.closest('.volume').remove();
             if (!diskList.querySelector('[data-disk]')) diskList.innerHTML = '<div class="empty">No disks configured.</div>';
             [...diskList.querySelectorAll('.disk-title')].forEach((title, index) => title.textContent = `Physical disk ${index + 1}`);
@@ -171,6 +182,7 @@
             diskList.insertAdjacentHTML('beforeend', diskTemplate({ id:makeId(), hardwareName:'', volumes:[] }, diskList.querySelectorAll('[data-disk]').length));
         });
         document.getElementById('save').addEventListener('click', save);
+        document.getElementById('drive-pool-mode').addEventListener('change', syncRootFolderFields);
         load();
     </script>
 </body>

@@ -38,7 +38,10 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
         disk.Volumes is null ||
         disk.Volumes.Count == 0 ||
         disk.Volumes.Any(volume => string.IsNullOrWhiteSpace(volume.Id) ||
-            string.IsNullOrWhiteSpace(volume.MountPoint) || volume.Capacity < 0)))
+            string.IsNullOrWhiteSpace(volume.MountPoint) || volume.Capacity < 0 ||
+            volume.RootFolderRelativePath is null ||
+            Path.IsPathRooted(volume.RootFolderRelativePath) ||
+            volume.RootFolderRelativePath.Split('\\', '/').Any(part => part == ".."))))
     {
         return Results.BadRequest(new { Error = "Each disk needs a unique ID, a name, and at least one valid volume." });
     }
