@@ -63,6 +63,7 @@
         .plan-table td { overflow-wrap:anywhere; }
         .plan-path { min-width:180px; font-family:Consolas,monospace; }
         .plan-muted { color:var(--muted); }
+        .reason-badge { display:inline-block; padding:3px 6px; background:#e9eee3; color:var(--deep); border-radius:4px; font-size:10px; font-weight:700; white-space:nowrap; }
         .volume-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr)); gap:10px; margin-top:15px; }
         .volume-card { min-width:0; padding:0; overflow:hidden; color:var(--ink); text-align:left; background:var(--surface); border:1px solid var(--line); border-top:5px solid var(--volume-color); border-radius:7px; cursor:pointer; }
         .volume-card[aria-pressed="true"] { outline:2px solid var(--volume-color); outline-offset:1px; }
@@ -194,10 +195,15 @@
                 selectedVolumeId = volumes[0]?.volumeId || null;
 
             const warningMarkup = (plan.warnings || []).map(warning => `<div class="plan-warning">${escapeHtml(warning.message)}</div>`).join('');
+
+            const placementMarkup = (plan.placements || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td>${escapeHtml(item.itemType)}</td><td><span class="reason-badge">${escapeHtml(item.reason)}</span></td><td>${escapeHtml(item.targetAlias)}</td><td>${formatBytes(item.sizeOnDisk)}</td></tr>`).join('');
+            const splitMarkup = (plan.splitFolders || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td class="plan-muted">${escapeHtml(item.reason)}</td></tr>`).join('');
             const unplacedMarkup = (plan.unplacedItems || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td>${escapeHtml(item.itemType)}</td><td>${escapeHtml(item.reason)}</td><td>${formatBytes(item.sizeOnDisk)}</td></tr>`).join('');
-            const placementMarkup = (plan.placements || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td>${escapeHtml(item.itemType)}</td><td>${escapeHtml(item.ruleId)}</td><td>${escapeHtml(item.targetAlias)}</td><td>${formatBytes(item.sizeOnDisk)}</td></tr>`).join('');
             const moveMarkup = (plan.moves || []).map(move => `<tr><td class="plan-path">${escapeHtml(move.relativePath)}</td><td>${escapeHtml(move.sourceAlias)}</td><td>${escapeHtml(move.targetAlias)}</td><td>${formatBytes(move.size)}</td></tr>`).join('');
+
             const emptyTable = '<tr><td colspan="5" class="plan-muted">No entries.</td></tr>';
+            const emptySplits = '<tr><td colspan="2" class="plan-muted">All folders stayed intact.</td></tr>';
+
             const volumeCards = volumes.map(volume => {
                 const color = activeVolumeColors.get(volume.volumeId);
                 const provenance = volume.provenance || [];
@@ -218,12 +224,14 @@
                     ${volume.isEligible ? '' : `<div class="volume-state">${escapeHtml(volume.status)}</div>`}
                 </button>`;
             }).join('');
+
             document.getElementById('plan-results').innerHTML = `
                 <div class="plan-counts"><span><strong>${plan.placements.length}</strong> placements</span><span><strong>${plan.moves.length}</strong> proposed moves</span><span><strong>${plan.unplacedItems.length}</strong> unplaced</span><span>Snapshot ${new Date(plan.snapshotScannedAt).toLocaleString()}</span></div>
                 ${warningMarkup}
                 <div class="volume-grid" id="volume-grid">${volumeCards || '<div class="empty">No usable volumes in this snapshot.</div>'}</div>
                 <div id="volume-detail" class="volume-detail"></div>
-                <details class="plan-group plan-secondary"><summary>Placements (${plan.placements.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Path</th><th>Type</th><th>Rule</th><th>Target volume</th><th>Size on disk</th></tr></thead><tbody>${placementMarkup || emptyTable}</tbody></table></div></details>
+                <details class="plan-group plan-secondary"><summary>Placements (${plan.placements.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Path</th><th>Type</th><th>Logic applied</th><th>Target volume</th><th>Size on disk</th></tr></thead><tbody>${placementMarkup || emptyTable}</tbody></table></div></details>
+                <details class="plan-group"><summary>Split Folders (${plan.splitFolders.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Folder Path</th><th>Reason</th></tr></thead><tbody>${splitMarkup || emptySplits}</tbody></table></div></details>
                 <details class="plan-group"><summary>Unplaced items (${plan.unplacedItems.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Path</th><th>Type</th><th>Reason</th><th>Size on disk</th></tr></thead><tbody>${unplacedMarkup || '<tr><td colspan="4" class="plan-muted">No unplaced items.</td></tr>'}</tbody></table></div></details>
                 <details class="plan-group"><summary>File-level move preview (${plan.moves.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>File</th><th>From volume</th><th>To volume</th><th>Logical size</th></tr></thead><tbody>${moveMarkup || '<tr><td colspan="4" class="plan-muted">No moves required.</td></tr>'}</tbody></table></div></details>`;
             renderVolumeDetails();

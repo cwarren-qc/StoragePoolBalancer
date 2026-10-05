@@ -56,7 +56,8 @@ public sealed record PlannedPlacement(
     string TargetAlias,
     string TargetVolumeId,
     string TargetMountPoint,
-    long SizeOnDisk
+    long SizeOnDisk,
+    string Reason
 );
 
 public sealed record PlannedMove(
@@ -100,6 +101,8 @@ public sealed record VolumePlanSummary(
     ImmutableArray<VolumeTransferGroup> Outgoing
 );
 
+public sealed record SplitFolder(string RelativePath, string Reason);
+
 public sealed record UnplacedItem(string RelativePath, string ItemType, string RuleId, string Reason, long SizeOnDisk);
 
 public sealed record PlanningWarning(string Message);
@@ -109,6 +112,7 @@ public sealed record PlacementPlan(
     ImmutableArray<PlannedPlacement> Placements,
     ImmutableArray<PlannedMove> Moves,
     ImmutableArray<UnplacedItem> UnplacedItems,
+    ImmutableArray<SplitFolder> SplitFolders,
     ImmutableArray<PlanningWarning> Warnings,
     ImmutableArray<VolumePlanSummary> Volumes
 );
