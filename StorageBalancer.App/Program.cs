@@ -1,0 +1,78 @@
+﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using StorageBalancer.App.Configuration;
+using StorageBalancer.App.Subsystems.Scanner;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Register our services as Singletons (they live for the lifetime of the app)
+builder.Services.AddSingleton<ConfigManager>();
+builder.Services.AddSingleton<StateScanner>();
+
+// Add support for serving a Web UI (HTML/JS)
+builder.Services.AddEndpointsApiExplorer();
+
+var app = builder.Build();
+app.UseDefaultFiles();
+app.UseStaticFiles(); // Allows serving index.html from wwwroot folder
+
+// --- API ENDPOINTS FOR THE WEB UI ---
+
+// GET: /api/config -> Returns the current configuration
+app.MapGet("/api/config", (ConfigManager configManager) =>
+{
+    return configManager.Load();
+});
+
+// POST: /api/config -> Saves configuration from the UI
+app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
+{
+    if (newConfig.Disks is null || newConfig.Disks.Any(disk =>
+        string.IsNullOrWhiteSpace(disk.Id) ||
+        string.IsNullOrWhiteSpace(disk.HardwareName) ||
+        disk.Volumes is null ||
+        disk.Volumes.Count == 0 ||
+        disk.Volumes.Any(volume => string.IsNullOrWhiteSpace(volume.Id) ||
+            string.IsNullOrWhiteSpace(volume.MountPoint) || volume.Capacity < 0)))
+    {
+        return Results.BadRequest(new { Error = "Each disk needs a unique ID, a name, and at least one valid volume." });
+    }
+
+    var diskIds = newConfig.Disks.Select(disk => disk.Id);
+    var volumeIds = newConfig.Disks.SelectMany(disk => disk.Volumes).Select(volume => volume.Id);
+    if (diskIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != newConfig.Disks.Count ||
+        volumeIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != volumeIds.Count())
+    {
+        return Results.BadRequest(new { Error = "Disk and volume IDs must be unique." });
+    }
+
+    configManager.Save(newConfig);
+    return Results.Ok();
+});
+
+// POST: /api/scan -> Starts a multithreaded scan; progress is available from /api/scan/status
+app.MapPost("/api/scan", (ConfigManager configManager, StateScanner scanner) =>
+{
+    var config = configManager.Load();
+
+    if (config.Disks.Count == 0)
+        return Results.BadRequest(new { Error = "Add at least one physical disk before scanning." });
+
+    if (!scanner.TryStartScan(config))
+        return Results.Conflict(new { Error = "A scan is already running." });
+
+    return Results.Accepted("/api/scan/status", scanner.GetStatus());
+});
+
+app.MapGet("/api/scan/status", (StateScanner scanner) => scanner.GetStatus());
+
+app.MapPost("/api/scan/cancel", (StateScanner scanner) =>
+{
+    if (!scanner.TryCancelScan())
+        return Results.Conflict(new { Error = "There is no active scan to cancel." });
+
+    return Results.Accepted("/api/scan/status", scanner.GetStatus());
+});
+
+// Start the Web Server on port 5000
+app.Run("http://localhost:5000");

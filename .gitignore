@@ -1,0 +1,14 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+artifacts/
+TestResults/
+
+# IDE files
+.vs/
+*.user
+*.suo
+*.cache
+
+# Machine-specific disk paths
+**/config.json
