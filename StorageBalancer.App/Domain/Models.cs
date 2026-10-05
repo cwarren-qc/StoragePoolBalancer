@@ -10,6 +10,7 @@ public record SnapshotIssue(string Path, string Message);
 
 public record SnapshotVolume(
     string Id,
+    string Alias,
     string MountPoint,
     long Capacity,
     long OtherItemsSizeOnDisk,

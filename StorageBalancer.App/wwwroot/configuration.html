@@ -34,6 +34,8 @@
         .root-folder-field[hidden] { display:none; }
         .field label { color:var(--muted); font-size:11px; font-weight:700; }
         .field input { width:100%; min-height:36px; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; outline:none; }
+        .field textarea { width:100%; min-height:88px; padding:8px 9px; resize:vertical; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; color:var(--ink); font:12px Consolas,monospace; outline:none; }
+        .field textarea:focus { border-color:var(--green); box-shadow:0 0 0 3px rgb(40 107 86 / 12%); }
         .field input:focus { border-color:var(--green); box-shadow:0 0 0 3px rgb(40 107 86 / 12%); }
         .disk-list { display:grid; gap:10px; }
         .disk { padding:16px 18px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
@@ -43,7 +45,19 @@
         .fields { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(240px,1.3fr); gap:12px; }
         .volumes { margin-top:16px; padding-top:10px; border-top:1px solid var(--line); }
         .volume-head { margin-bottom:7px; font-size:12px; font-weight:700; }
-        .volume { display:grid; grid-template-columns:minmax(180px,1.1fr) minmax(150px,1fr) minmax(120px,.65fr) auto; align-items:end; gap:10px; padding:6px 0; }
+        .volume { display:grid; grid-template-columns:minmax(120px,.65fr) minmax(180px,1.1fr) minmax(150px,1fr) minmax(120px,.65fr) auto; align-items:end; gap:10px; padding:6px 0; }
+        .rule-list { display:grid; gap:9px; }
+        .rule { padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
+        .rule-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+        .rule-title { font-size:13px; font-weight:750; }
+        .rule-actions { display:flex; gap:3px; }
+        .rule-actions button { min-height:30px; padding:0 8px; border:0; background:transparent; color:var(--muted); font-size:12px; }
+        .rule-actions .remove { color:var(--orange); }
+        .rule-fields { display:grid; grid-template-columns:minmax(200px,1fr) minmax(130px,.3fr); gap:12px; }
+        .allowed-volumes { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:7px 14px; margin-top:4px; }
+        .volume-choice { display:flex; align-items:flex-start; gap:8px; min-width:0; width:100%; color:var(--ink); font-size:12px; overflow-wrap:anywhere; }
+        .volume-choice input { flex:none; width:16px; height:16px; min-height:16px; padding:0; border:0; background:transparent; accent-color:var(--green); }
+        .volume-choice span { min-width:0; line-height:1.45; overflow-wrap:anywhere; }
         .unit { position:relative; }
         .unit input { padding-right:40px; }
         .unit span { position:absolute; top:10px; right:9px; color:var(--muted); font-size:11px; }
@@ -75,21 +89,31 @@
                 <button class="button" id="add-disk" type="button">+ Add disk</button>
             </div>
             <div class="disk-list" id="disk-list"></div>
+            <div class="section-head">
+                <div><h2>File placement rules</h2><p>Rules run from top to bottom; put more specific paths before broad rules.</p></div>
+                <button class="button" id="add-rule" type="button">+ Add rule</button>
+            </div>
+            <div class="rule-list" id="rule-list"></div>
+            <div class="section-head"><div><h2>Never-move patterns</h2></div></div>
+            <div class="field"><label for="excluded-path-patterns">Relative path patterns</label><textarea id="excluded-path-patterns" rows="4" spellcheck="false" placeholder="\$RECYCLE.BIN\\.*"></textarea></div>
+            <p class="sub">Case-insensitive regular expressions matched against paths relative to each volume root.</p>
             <div class="notice" id="notice" role="status" aria-live="polite"></div>
             <div class="actions"><a class="back" href="/">Cancel</a><button class="button primary" id="save" type="button">Save configuration</button></div>
         </section>
     </main>
     <script>
         const diskList = document.getElementById('disk-list');
+        const ruleList = document.getElementById('rule-list');
         const notice = document.getElementById('notice');
         const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[character]);
         const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-        function volumeTemplate(volume = {}) {
+        function volumeTemplate(volume = {}, diskIndex = 0, volumeIndex = 0) {
             const capacity = Number(volume.capacity || 0) / (1024 ** 3);
             const displayedCapacity = Number.isFinite(capacity) ? Number(capacity.toFixed(3)) : 0;
             return `<div class="volume">
                 <input type="hidden" data-field="id" value="${escapeHtml(volume.id || makeId())}">
+            <div class="field"><label>Alias</label><input data-field="alias" value="${escapeHtml(volume.alias)}" placeholder="D${diskIndex + 1}-V${volumeIndex + 1}"></div>
                 <div class="field"><label>Mount point</label><input data-field="mountPoint" value="${escapeHtml(volume.mountPoint)}" placeholder="E:\\ or /mnt/media" required></div>
                 <div class="field root-folder-field"><label>Root folder (relative)</label><input data-field="rootFolderRelativePath" value="${escapeHtml(volume.rootFolderRelativePath)}" placeholder="Blank scans the volume root"></div>
                 <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.001" value="${displayedCapacity}"><span>GiB</span></div></div>
@@ -106,7 +130,7 @@
                     <div class="field"><label>Disk name</label><input data-field="hardwareName" value="${escapeHtml(disk.hardwareName)}" placeholder="Media disk 1" required></div>
                     <div class="field"><label>Notes or hardware identifier</label><input data-field="description" value="${escapeHtml(disk.description)}" placeholder="Optional"></div>
                 </div>
-                <div class="volumes"><div class="volume-head"><span>Volumes</span><button class="button subtle" data-action="add-volume" type="button">+ Add volume</button></div><div data-volumes>${volumes.map(volumeTemplate).join('')}</div></div>
+                <div class="volumes"><div class="volume-head"><span>Volumes</span><button class="button subtle" data-action="add-volume" type="button">+ Add volume</button></div><div data-volumes>${volumes.map((volume, volumeIndex) => volumeTemplate(volume, index, volumeIndex)).join('')}</div></div>
             </article>`;
         }
 
@@ -115,7 +139,50 @@
             diskList.innerHTML = disks.length ? disks.map(diskTemplate).join('') : '<div class="empty">No disks configured.</div>';
             document.getElementById('snapshots-folder').value = config.snapshotsFolder || '';
             document.getElementById('drive-pool-mode').checked = Boolean(config.drivePoolMode);
+            document.getElementById('excluded-path-patterns').value = (config.excludedPathPatterns || []).join('\n');
             syncRootFolderFields();
+            renderRules(config.filePlacementRules || []);
+        }
+
+        function renderRules(rules) {
+            const volumes = [];
+            [...diskList.querySelectorAll('[data-disk]')].forEach((diskElement, diskIndex) => {
+                const diskName = diskElement.querySelector('[data-field="hardwareName"]').value.trim() || `Physical disk ${diskIndex + 1}`;
+                [...diskElement.querySelectorAll('.volume')].forEach((volumeElement, volumeIndex) => {
+                    volumes.push({
+                        id:volumeElement.querySelector('[data-field="id"]').value,
+                        alias:volumeElement.querySelector('[data-field="alias"]').value.trim() || `D${diskIndex + 1}-V${volumeIndex + 1}`
+                    });
+                });
+            });
+            ruleList.innerHTML = rules.length ? rules.map((rule, index) => {
+                const selectedVolumeIds = new Set(rule.allowedVolumeIds || []);
+                const volumeChoices = volumes.length
+                    ? volumes.map(volume => `<label class="volume-choice"><input type="checkbox" data-allowed-volume="${escapeHtml(volume.id)}" ${selectedVolumeIds.has(volume.id) ? 'checked' : ''}><span>${escapeHtml(volume.alias)}</span></label>`).join('')
+                    : '<span class="sub">Add a volume before selecting allowed targets.</span>';
+                return `<article class="rule" data-rule>
+                    <input type="hidden" data-rule-field="id" value="${escapeHtml(rule.id || makeId())}">
+                    <div class="rule-head"><div class="rule-title">Rule ${index + 1}</div><div class="rule-actions">
+                        <button type="button" data-rule-action="up" aria-label="Move rule up" title="Move rule up">&#8593;</button>
+                        <button type="button" data-rule-action="down" aria-label="Move rule down" title="Move rule down">&#8595;</button>
+                        <button class="remove" type="button" data-rule-action="remove">Remove</button>
+                    </div></div>
+                    <div class="rule-fields">
+                        <div class="field"><label>Relative path</label><input data-rule-field="fullRelativePath" value="${escapeHtml(rule.fullRelativePath)}" placeholder="TV Series"></div>
+                        <div class="field"><label>Starting depth</label><input data-rule-field="startingDepth" type="number" min="1" step="1" value="${Number(rule.startingDepth || 1)}"></div>
+                    </div>
+                    <div class="field" style="margin-top:12px"><label>Allowed volumes</label><div class="allowed-volumes">${volumeChoices}</div></div>
+                </article>`;
+            }).join('') : '<div class="empty">No placement rules configured.</div>';
+        }
+
+        function collectRules() {
+            return [...ruleList.querySelectorAll('[data-rule]')].map(element => ({
+                id:element.querySelector('[data-rule-field="id"]').value,
+                fullRelativePath:element.querySelector('[data-rule-field="fullRelativePath"]').value.trim().replace(/\//g, '\\').replace(/\\+/g, '\\').replace(/^\\|\\$/g, ''),
+                startingDepth:Number(element.querySelector('[data-rule-field="startingDepth"]').value),
+                allowedVolumeIds:[...element.querySelectorAll('[data-allowed-volume]:checked')].map(input => input.dataset.allowedVolume)
+            }));
         }
 
         function syncRootFolderFields() {
@@ -142,22 +209,39 @@
                     const value = name => volume.querySelector(`[data-field="${name}"]`).value;
                     const capacity = Number(value('capacity'));
                     if (!Number.isFinite(capacity) || capacity < 0) throw new Error('Volume capacity must be zero or greater.');
-                    return { id:value('id'), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)), rootFolderRelativePath:value('rootFolderRelativePath').trim() };
+                    return { id:value('id'), alias:value('alias').trim(), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)), rootFolderRelativePath:value('rootFolderRelativePath').trim() };
                 });
                 return { id:field('id'), hardwareName:field('hardwareName').trim(), description:field('description').trim(), volumes };
             });
             if (disks.some(disk => !disk.hardwareName || !disk.volumes.length || disk.volumes.some(volume => !volume.mountPoint)))
                 throw new Error('Enter a disk name and at least one mounted volume for each disk.');
+            const filePlacementRules = collectRules();
+            if (filePlacementRules.some(rule => !Number.isInteger(rule.startingDepth) || rule.startingDepth < 1 || !rule.allowedVolumeIds.length || rule.fullRelativePath.split('\\').some(part => part === '..')))
+                throw new Error('Each placement rule needs a valid depth and at least one allowed volume. Paths cannot move above the pool root.');
             const snapshotsFolder = document.getElementById('snapshots-folder').value.trim();
             if (!snapshotsFolder) throw new Error('Choose a snapshots folder.');
-            return { drivePoolMode:document.getElementById('drive-pool-mode').checked, snapshotsFolder, disks };
+            const excludedPathPatterns = document.getElementById('excluded-path-patterns').value.split(/\r?\n/).map(pattern => pattern.trim()).filter(Boolean);
+            return { drivePoolMode:document.getElementById('drive-pool-mode').checked, snapshotsFolder, disks, filePlacementRules, excludedPathPatterns };
         }
 
         async function save() {
             try {
-                await request('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(collect()) });
+                const config = collect();
+                await request('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config) });
+                const savedConfig = await request('/api/config');
+                const savedRulesById = new Map((savedConfig.filePlacementRules || []).map(rule => [rule.id, rule]));
+                const rulesWereSaved = config.filePlacementRules.every(rule => {
+                    const savedRule = savedRulesById.get(rule.id);
+                    return savedRule &&
+                        savedRule.fullRelativePath === rule.fullRelativePath &&
+                        savedRule.startingDepth === rule.startingDepth &&
+                        JSON.stringify(savedRule.allowedVolumeIds || []) === JSON.stringify(rule.allowedVolumeIds);
+                });
+                const savedPatterns = savedConfig.excludedPathPatterns || [];
+                const patternsWereSaved = JSON.stringify(savedPatterns) === JSON.stringify(config.excludedPathPatterns);
+                if (!rulesWereSaved || !patternsWereSaved) throw new Error('The running app did not save the placement rules or never-move patterns. Stop it, rebuild, and launch the latest version before saving again.');
                 notice.classList.remove('error');
-                notice.textContent = 'Configuration saved.';
+                notice.textContent = `Configuration saved with ${config.filePlacementRules.length} placement rule${config.filePlacementRules.length === 1 ? '' : 's'} and ${config.excludedPathPatterns.length} never-move pattern${config.excludedPathPatterns.length === 1 ? '' : 's'}.`;
             } catch (error) {
                 notice.textContent = error.message;
                 notice.classList.add('error');
@@ -170,16 +254,36 @@
             const disk = button.closest('[data-disk]');
             if (button.dataset.action === 'remove-disk') disk.remove();
             if (button.dataset.action === 'add-volume') {
-                disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate());
+                const diskIndex = [...diskList.querySelectorAll('[data-disk]')].indexOf(disk);
+                const volumeIndex = disk.querySelectorAll('.volume').length;
+                disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate({}, diskIndex, volumeIndex));
                 syncRootFolderFields();
             }
             if (button.dataset.action === 'remove-volume') button.closest('.volume').remove();
             if (!diskList.querySelector('[data-disk]')) diskList.innerHTML = '<div class="empty">No disks configured.</div>';
             [...diskList.querySelectorAll('.disk-title')].forEach((title, index) => title.textContent = `Physical disk ${index + 1}`);
+            renderRules(collectRules());
         });
         document.getElementById('add-disk').addEventListener('click', () => {
             if (diskList.querySelector('.empty')) diskList.innerHTML = '';
             diskList.insertAdjacentHTML('beforeend', diskTemplate({ id:makeId(), hardwareName:'', volumes:[] }, diskList.querySelectorAll('[data-disk]').length));
+            syncRootFolderFields();
+            renderRules(collectRules());
+        });
+        document.getElementById('add-rule').addEventListener('click', () => {
+            const rules = collectRules();
+            rules.push({ id:makeId(), fullRelativePath:'', startingDepth:1, allowedVolumeIds:[] });
+            renderRules(rules);
+        });
+        ruleList.addEventListener('click', event => {
+            const button = event.target.closest('[data-rule-action]');
+            if (!button) return;
+            const rule = button.closest('[data-rule]');
+            if (button.dataset.ruleAction === 'remove') rule.remove();
+            if (button.dataset.ruleAction === 'up' && rule.previousElementSibling) ruleList.insertBefore(rule, rule.previousElementSibling);
+            if (button.dataset.ruleAction === 'down' && rule.nextElementSibling) ruleList.insertBefore(rule.nextElementSibling, rule);
+            if (!ruleList.querySelector('[data-rule]')) ruleList.innerHTML = '<div class="empty">No placement rules configured.</div>';
+            [...ruleList.querySelectorAll('.rule-title')].forEach((title, index) => title.textContent = `Rule ${index + 1}`);
         });
         document.getElementById('save').addEventListener('click', save);
         document.getElementById('drive-pool-mode').addEventListener('change', syncRootFolderFields);

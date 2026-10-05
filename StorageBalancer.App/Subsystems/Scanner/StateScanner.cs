@@ -98,8 +98,8 @@ public class StateScanner
         var cancellationToken = cancellation.Token;
         try
         {
-            var diskScanTasks = config.Disks.Select(diskConfig => Task.Run(
-                () => ScanPhysicalDisk(diskConfig, config.DrivePoolMode, cancellationToken), cancellationToken));
+            var diskScanTasks = config.Disks.Select((diskConfig, diskIndex) => Task.Run(
+                () => ScanPhysicalDisk(diskConfig, diskIndex, config.DrivePoolMode, cancellationToken), cancellationToken));
             var scannedDisks = await Task.WhenAll(diskScanTasks);
             var snapshot = new PoolSnapshot(
                 1,
@@ -155,7 +155,7 @@ public class StateScanner
         }
     }
 
-    private SnapshotDisk ScanPhysicalDisk(PhysicalDiskConfig diskConfig, bool drivePoolMode, CancellationToken cancellationToken)
+    private SnapshotDisk ScanPhysicalDisk(PhysicalDiskConfig diskConfig, int diskIndex, bool drivePoolMode, CancellationToken cancellationToken)
     {
         Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Starting Disk: {diskConfig.HardwareName}");
         UpdateProgress(diskConfig.Id, progress => progress with { Status = "Scanning" });
@@ -163,8 +163,9 @@ public class StateScanner
         var volumes = ImmutableList.CreateBuilder<SnapshotVolume>();
 
         // Scan volumes SEQUENTIALLY to prevent disk head thrashing
-        foreach (var volConfig in diskConfig.Volumes)
+        for (var volumeIndex = 0; volumeIndex < diskConfig.Volumes.Count; volumeIndex++)
         {
+            var volConfig = diskConfig.Volumes[volumeIndex];
             cancellationToken.ThrowIfCancellationRequested();
             UpdateProgress(diskConfig.Id, progress => progress with { CurrentVolumeMountPoint = volConfig.MountPoint });
             var issues = new List<SnapshotIssue>();
@@ -204,6 +205,7 @@ public class StateScanner
 
             volumes.Add(new SnapshotVolume(
                 volConfig.Id,
+                string.IsNullOrWhiteSpace(volConfig.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volConfig.Alias.Trim(),
                 volConfig.MountPoint,
                 volConfig.Capacity,
                 otherItemsSizeOnDisk,
