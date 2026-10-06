@@ -9,8 +9,8 @@ public record SnapshotFile(string Name, long Size, long SizeOnDisk);
 public record SnapshotIssue(string Path, string Message);
 
 public record SnapshotVolume(
-    string Id,
     string Alias,
+    string Disk,
     string MountPoint,
     long Capacity,
     long OtherItemsSizeOnDisk,
@@ -21,17 +21,10 @@ public record SnapshotVolume(
     SortedDictionary<string, List<SnapshotFile>> Folders
 );
 
-public record SnapshotDisk(
-    string Id,
-    string HardwareName,
-    string Description,
-    ImmutableList<SnapshotVolume> Volumes
-);
-
 public record PoolSnapshot(
     int SchemaVersion,
     DateTime ScannedAt,
     bool DrivePoolMode,
     int AllocationUnitSize,
-    ImmutableList<SnapshotDisk> Disks
+    ImmutableList<SnapshotVolume> Volumes
 );

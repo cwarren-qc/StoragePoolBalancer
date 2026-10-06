@@ -5,6 +5,12 @@ using StorageBalancer.App.Subsystems.Storage;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Subsystems.Scanner;
 using StorageBalancer.App.Subsystems.Planning;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using System;
+using System.Linq;
+using System.IO;
+using System.Collections.Generic;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,48 +35,34 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
     if (string.IsNullOrWhiteSpace(newConfig.SnapshotsFolder))
         return Results.BadRequest(new { Error = "Choose a snapshots folder." });
 
-    if (newConfig.Disks is null || newConfig.Disks.Any(disk =>
-        string.IsNullOrWhiteSpace(disk.Id) ||
-        string.IsNullOrWhiteSpace(disk.HardwareName) ||
-        disk.Volumes is null ||
-        disk.Volumes.Count == 0 ||
-        disk.Volumes.Any(volume => string.IsNullOrWhiteSpace(volume.Id) ||
-            string.IsNullOrWhiteSpace(volume.MountPoint) || volume.Capacity < 0 ||
-            volume.Alias is null || volume.Alias.Length > 64 ||
-            volume.RootFolderRelativePath is null ||
-            Path.IsPathRooted(volume.RootFolderRelativePath) ||
-            volume.RootFolderRelativePath.Split('\\', '/').Any(part => part == ".."))))
+    if (newConfig.Volumes is null || newConfig.Volumes.Count == 0 || newConfig.Volumes.Any(volume =>
+        string.IsNullOrWhiteSpace(volume.Alias) ||
+        string.IsNullOrWhiteSpace(volume.MountPoint) || volume.Capacity < 0 ||
+        volume.Alias.Length > 64 ||
+        volume.RootFolderRelativePath is null ||
+        Path.IsPathRooted(volume.RootFolderRelativePath) ||
+        volume.RootFolderRelativePath.Split('\\', '/').Any(part => part == "..")))
     {
-        return Results.BadRequest(new { Error = "Each disk needs a unique ID, a name, and at least one valid volume." });
+        return Results.BadRequest(new { Error = "Each volume needs a unique Alias, a Mount Point, and a valid capacity." });
     }
 
     if (newConfig.FilePlacementRules is null || newConfig.FilePlacementRules.Any(rule =>
-        string.IsNullOrWhiteSpace(rule.Id) ||
         rule.FullRelativePath is null ||
         rule.StartingDepth < 1 ||
-        (!rule.DeferPlacement && (rule.AllowedVolumeIds is null || rule.AllowedVolumeIds.Count == 0)) ||
+        (!rule.DeferPlacement && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) ||
         rule.FullRelativePath.Replace('/', '\\').StartsWith('\\') ||
         rule.FullRelativePath.Split('\\', '/').Any(part => part == "..")))
     {
-        return Results.BadRequest(new { Error = "Each placement rule needs an ID, a relative path, a starting depth of at least 1, and one or more allowed volumes (unless Deferred)." });
+        return Results.BadRequest(new { Error = "Each placement rule needs a relative path, a starting depth of at least 1, and one or more allowed volume aliases (unless Deferred)." });
     }
 
-    var diskIds = newConfig.Disks.Select(disk => disk.Id).ToArray();
-    var volumeIds = newConfig.Disks.SelectMany(disk => disk.Volumes).Select(volume => volume.Id).ToArray();
-    var volumeAliases = newConfig.Disks
-        .SelectMany((disk, diskIndex) => disk.Volumes.Select((volume, volumeIndex) =>
-            string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias.Trim()))
-        .ToArray();
-    var ruleIds = newConfig.FilePlacementRules.Select(rule => rule.Id);
-    var configuredVolumeIds = new HashSet<string>(volumeIds, StringComparer.OrdinalIgnoreCase);
+    var aliases = newConfig.Volumes.Select(v => v.Alias.Trim()).ToArray();
+    var configuredAliases = new HashSet<string>(aliases, StringComparer.OrdinalIgnoreCase);
 
-    if (diskIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != newConfig.Disks.Count ||
-        volumeIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != volumeIds.Length ||
-        volumeAliases.Distinct(StringComparer.OrdinalIgnoreCase).Count() != volumeAliases.Length ||
-        ruleIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != newConfig.FilePlacementRules.Count ||
-        newConfig.FilePlacementRules.Any(rule => rule.AllowedVolumeIds.Any(id => !configuredVolumeIds.Contains(id))))
+    if (aliases.Distinct(StringComparer.OrdinalIgnoreCase).Count() != aliases.Length ||
+        newConfig.FilePlacementRules.Any(rule => rule.AllowedVolumeAliases.Any(a => !configuredAliases.Contains(a))))
     {
-        return Results.BadRequest(new { Error = "Disk, volume, and rule IDs must be unique, and every allowed volume must be configured." });
+        return Results.BadRequest(new { Error = "Volume Aliases must be unique, and every allowed volume must be configured." });
     }
 
     configManager.Save(newConfig);
@@ -82,14 +74,15 @@ app.MapPost("/api/scan", (ScanStartRequest? request, ConfigManager configManager
     var config = configManager.Load();
 
     if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
-        return Results.BadRequest(new { Error = "Snapshots folder is not configured. Set it on the Configuration page before starting a scan." });
+        return Results.BadRequest(new { Error = "Snapshots folder is not configured." });
 
-    if (config.Disks.Count == 0)
-        return Results.BadRequest(new { Error = "Add at least one physical disk before scanning." });
+    if (config.Volumes.Count == 0)
+        return Results.BadRequest(new { Error = "Add at least one volume before scanning." });
 
     var snapshotName = string.IsNullOrWhiteSpace(request?.SnapshotName)
         ? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")
         : request.SnapshotName.Trim();
+
     if (snapshotName.Length > 120 || snapshotName is "." or ".." || snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         return Results.BadRequest(new { Error = "Use a snapshot name of 120 characters or fewer without filename-invalid characters." });
 

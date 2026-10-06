@@ -16,7 +16,7 @@ public class StateScanner
 {
     private readonly int _blockSize;
     private readonly JsonStateRepository _stateRepository;
-    private readonly ConcurrentDictionary<string, DiskScanProgress> _diskProgress = new();
+    private readonly ConcurrentDictionary<string, VolumeScanProgress> _volumeProgress = new();
     private readonly object _statusLock = new();
     private bool _isScanning;
     private CancellationTokenSource? _scanCancellation;
@@ -42,7 +42,7 @@ public class StateScanner
                 _error,
                 _snapshotName,
                 _snapshotPath,
-                _diskProgress.Values.OrderBy(disk => disk.HardwareName).ToArray());
+                _volumeProgress.Values.OrderBy(v => v.Alias).ToArray());
         }
     }
 
@@ -59,21 +59,17 @@ public class StateScanner
             _error = null;
             _snapshotName = snapshotName;
             _snapshotPath = snapshotPath;
-            _diskProgress.Clear();
+            _volumeProgress.Clear();
 
-            foreach (var disk in config.Disks)
+            foreach (var vol in config.Volumes)
             {
-                _diskProgress[disk.Id] = new DiskScanProgress(
-                    disk.Id,
-                    disk.HardwareName,
+                _volumeProgress[vol.Alias] = new VolumeScanProgress(
+                    vol.Alias,
+                    vol.Disk ?? string.Empty,
                     "Queued",
                     string.Empty,
-                    0,
-                    0,
-                    0,
-                    null,
-                    null,
-                    ImmutableList<DiskScanIssue>.Empty);
+                    0, 0, 0, null,
+                    ImmutableList<ScanIssue>.Empty);
             }
         }
 
@@ -98,15 +94,24 @@ public class StateScanner
         var cancellationToken = cancellation.Token;
         try
         {
-            var diskScanTasks = config.Disks.Select((diskConfig, diskIndex) => Task.Run(
-                () => ScanPhysicalDisk(diskConfig, diskIndex, config.DrivePoolMode, cancellationToken), cancellationToken));
-            var scannedDisks = await Task.WhenAll(diskScanTasks);
+            // Group volumes by the Disk field. If Disk is missing/empty, use the Alias as a fallback group
+            var scanGroups = config.Volumes.GroupBy(v =>
+                string.IsNullOrWhiteSpace(v.Disk) ? v.Alias : v.Disk.Trim(),
+                StringComparer.OrdinalIgnoreCase);
+
+            var scanTasks = scanGroups.Select(group => Task.Run(
+                () => ScanVolumeGroup(group.Key, group.ToList(), config.DrivePoolMode, cancellationToken), cancellationToken));
+
+            var scannedGroups = await Task.WhenAll(scanTasks);
+            var allScannedVolumes = scannedGroups.SelectMany(g => g).ToImmutableList();
+
             var snapshot = new PoolSnapshot(
                 1,
                 DateTime.UtcNow,
                 config.DrivePoolMode,
                 _blockSize,
-                scannedDisks.ToImmutableList());
+                allScannedVolumes);
+
             _stateRepository.SaveSnapshot(snapshot, snapshotPath);
 
             lock (_statusLock)
@@ -120,9 +125,9 @@ public class StateScanner
             lock (_statusLock)
             {
                 _isScanning = false;
-                foreach (var diskId in _diskProgress.Keys)
+                foreach (var alias in _volumeProgress.Keys)
                 {
-                    UpdateProgress(diskId, progress => progress.Status is "Queued" or "Scanning"
+                    UpdateProgress(alias, progress => progress.Status is "Queued" or "Scanning"
                         ? progress with { Status = "Cancelled", CurrentPath = string.Empty }
                         : progress);
                 }
@@ -135,9 +140,9 @@ public class StateScanner
                 _isScanning = false;
                 _error = exception.Message;
 
-                foreach (var diskId in _diskProgress.Keys)
+                foreach (var alias in _volumeProgress.Keys)
                 {
-                    UpdateProgress(diskId, progress => progress.Status == "Scanning"
+                    UpdateProgress(alias, progress => progress.Status == "Scanning"
                         ? progress with { Status = "Failed", Error = exception.Message }
                         : progress);
                 }
@@ -155,19 +160,18 @@ public class StateScanner
         }
     }
 
-    private SnapshotDisk ScanPhysicalDisk(PhysicalDiskConfig diskConfig, int diskIndex, bool drivePoolMode, CancellationToken cancellationToken)
+    private List<SnapshotVolume> ScanVolumeGroup(string diskName, List<VolumeConfig> volumesInGroup, bool drivePoolMode, CancellationToken cancellationToken)
     {
-        Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Starting Disk: {diskConfig.HardwareName}");
-        UpdateProgress(diskConfig.Id, progress => progress with { Status = "Scanning" });
+        Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Starting Disk Group: {diskName}");
 
-        var volumes = ImmutableList.CreateBuilder<SnapshotVolume>();
+        var scannedVolumes = new List<SnapshotVolume>();
 
         // Scan volumes SEQUENTIALLY to prevent disk head thrashing
-        for (var volumeIndex = 0; volumeIndex < diskConfig.Volumes.Count; volumeIndex++)
+        foreach (var volConfig in volumesInGroup)
         {
-            var volConfig = diskConfig.Volumes[volumeIndex];
             cancellationToken.ThrowIfCancellationRequested();
-            UpdateProgress(diskConfig.Id, progress => progress with { CurrentVolumeMountPoint = volConfig.MountPoint });
+            UpdateProgress(volConfig.Alias, progress => progress with { Status = "Scanning", CurrentPath = volConfig.MountPoint });
+
             var issues = new List<SnapshotIssue>();
             DirectoryInfo? scanRoot = null;
             var folders = new SortedDictionary<string, List<SnapshotFile>>(StringComparer.Ordinal);
@@ -178,12 +182,12 @@ public class StateScanner
             {
                 var volumeRoot = new DirectoryInfo(volConfig.MountPoint);
                 scanRoot = drivePoolMode
-                    ? FindPoolPartRoot(diskConfig.Id, volumeRoot, issues, cancellationToken)
-                    : ResolveConfiguredRoot(diskConfig.Id, volumeRoot, volConfig.RootFolderRelativePath, issues);
+                    ? FindPoolPartRoot(volConfig.Alias, volumeRoot, issues, cancellationToken)
+                    : ResolveConfiguredRoot(volConfig.Alias, volumeRoot, volConfig.RootFolderRelativePath, issues);
 
                 Console.WriteLine($"  -> Scanning Volume: {volumeRoot.FullName}");
                 otherItemsSizeOnDisk = ScanDirectory(
-                    diskConfig.Id,
+                    volConfig.Alias,
                     volumeRoot,
                     scanRoot,
                     folders,
@@ -192,7 +196,7 @@ public class StateScanner
                     ref rootWasFound);
 
                 if (scanRoot is not null && !rootWasFound)
-                    AddIssue(diskConfig.Id, issues, scanRoot.FullName, "Configured root folder was not found during the volume scan.");
+                    AddIssue(volConfig.Alias, issues, scanRoot.FullName, "Configured root folder was not found during the volume scan.");
             }
             catch (OperationCanceledException)
             {
@@ -200,12 +204,12 @@ public class StateScanner
             }
             catch (Exception exception)
             {
-                AddIssue(diskConfig.Id, issues, volConfig.MountPoint, exception.Message);
+                AddIssue(volConfig.Alias, issues, volConfig.MountPoint, exception.Message);
             }
 
-            volumes.Add(new SnapshotVolume(
-                volConfig.Id,
-                string.IsNullOrWhiteSpace(volConfig.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volConfig.Alias.Trim(),
+            scannedVolumes.Add(new SnapshotVolume(
+                volConfig.Alias,
+                diskName,
                 volConfig.MountPoint,
                 volConfig.Capacity,
                 otherItemsSizeOnDisk,
@@ -214,15 +218,16 @@ public class StateScanner
                 scanRoot is not null && rootWasFound && issues.Count == 0,
                 issues.ToImmutableList(),
                 folders));
+
+            UpdateProgress(volConfig.Alias, progress => progress with { Status = "Complete", CurrentPath = string.Empty });
         }
 
-        Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Finished Disk: {diskConfig.HardwareName}");
-        UpdateProgress(diskConfig.Id, progress => progress with { Status = "Complete", CurrentPath = string.Empty });
-        return new SnapshotDisk(diskConfig.Id, diskConfig.HardwareName, diskConfig.Description, volumes.ToImmutable());
+        Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Finished Disk Group: {diskName}");
+        return scannedVolumes;
     }
 
     private DirectoryInfo? FindPoolPartRoot(
-        string diskId,
+        string alias,
         DirectoryInfo volumeRoot,
         List<SnapshotIssue> issues,
         CancellationToken cancellationToken)
@@ -237,7 +242,7 @@ public class StateScanner
             var message = matches.Length == 0
                 ? "No PoolPart.* directory was found."
                 : "More than one PoolPart.* directory was found; select a volume with exactly one pool folder.";
-            AddIssue(diskId, issues, volumeRoot.FullName, message);
+            AddIssue(alias, issues, volumeRoot.FullName, message);
             return null;
         }
         catch (OperationCanceledException)
@@ -246,13 +251,13 @@ public class StateScanner
         }
         catch (Exception exception)
         {
-            AddIssue(diskId, issues, volumeRoot.FullName, exception.Message);
+            AddIssue(alias, issues, volumeRoot.FullName, exception.Message);
             return null;
         }
     }
 
     private DirectoryInfo? ResolveConfiguredRoot(
-        string diskId,
+        string alias,
         DirectoryInfo volumeRoot,
         string? configuredRoot,
         List<SnapshotIssue> issues)
@@ -264,7 +269,7 @@ public class StateScanner
             var relativePath = Path.GetRelativePath(fullVolumePath, fullRootPath);
             if (Path.IsPathRooted(relativePath) || relativePath == ".." || relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             {
-                AddIssue(diskId, issues, fullRootPath, "Configured root folder must be inside its volume.");
+                AddIssue(alias, issues, fullRootPath, "Configured root folder must be inside its volume.");
                 return null;
             }
 
@@ -272,13 +277,13 @@ public class StateScanner
         }
         catch (Exception exception)
         {
-            AddIssue(diskId, issues, volumeRoot.FullName, exception.Message);
+            AddIssue(alias, issues, volumeRoot.FullName, exception.Message);
             return null;
         }
     }
 
     private long ScanDirectory(
-        string diskId,
+        string alias,
         DirectoryInfo dirInfo,
         DirectoryInfo? selectedRoot,
         SortedDictionary<string, List<SnapshotFile>> folders,
@@ -298,7 +303,7 @@ public class StateScanner
                 rootWasFound = true;
         }
 
-        UpdateProgress(diskId, progress => progress with
+        UpdateProgress(alias, progress => progress with
         {
             CurrentPath = dirInfo.FullName,
             FoldersScanned = progress.FoldersScanned + 1
@@ -309,7 +314,7 @@ public class StateScanner
         {
             if (!dirInfo.Exists)
             {
-                AddIssue(diskId, issues, dirInfo.FullName, "Folder does not exist or is not accessible.");
+                AddIssue(alias, issues, dirInfo.FullName, "Folder does not exist or is not accessible.");
                 return 0;
             }
 
@@ -329,7 +334,7 @@ public class StateScanner
                             IsSamePath(reparseDirectory.FullName, selectedRoot.FullName))
                         {
                             otherSizeOnDisk += ScanDirectory(
-                                diskId,
+                                alias,
                                 reparseDirectory,
                                 selectedRoot,
                                 folders,
@@ -341,7 +346,7 @@ public class StateScanner
 
                         if (files is null && fileSystemInfo is DirectoryInfo)
                             otherSizeOnDisk += GetFolderSizeOnDisk();
-                        AddIssue(diskId, issues, fileSystemInfo.FullName, "Reparse point was skipped.");
+                        AddIssue(alias, issues, fileSystemInfo.FullName, "Reparse point was skipped.");
                         continue;
                     }
 
@@ -354,7 +359,7 @@ public class StateScanner
                         else
                             otherSizeOnDisk += sizeOnDisk;
 
-                        UpdateProgress(diskId, progress => progress with
+                        UpdateProgress(alias, progress => progress with
                         {
                             CurrentPath = fileInfo.FullName,
                             FilesScanned = progress.FilesScanned + 1,
@@ -364,7 +369,7 @@ public class StateScanner
                     else if (fileSystemInfo is DirectoryInfo subDirInfo)
                     {
                         otherSizeOnDisk += ScanDirectory(
-                            diskId,
+                            alias,
                             subDirInfo,
                             selectedRoot,
                             folders,
@@ -379,7 +384,7 @@ public class StateScanner
                 }
                 catch (Exception exception)
                 {
-                    AddIssue(diskId, issues, fileSystemInfo.FullName, exception.Message);
+                    AddIssue(alias, issues, fileSystemInfo.FullName, exception.Message);
                 }
             }
         }
@@ -389,7 +394,7 @@ public class StateScanner
         }
         catch (Exception exception)
         {
-            AddIssue(diskId, issues, dirInfo.FullName, exception.Message);
+            AddIssue(alias, issues, dirInfo.FullName, exception.Message);
         }
 
         files?.Sort(CompareSnapshotFile);
@@ -443,22 +448,22 @@ public class StateScanner
         return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left.Name, right.Name);
     }
 
-    private void AddIssue(string diskId, List<SnapshotIssue> issues, string path, string message)
+    private void AddIssue(string alias, List<SnapshotIssue> issues, string path, string message)
     {
         issues.Add(new SnapshotIssue(path, message));
-        UpdateProgress(diskId, progress => progress with
+        UpdateProgress(alias, progress => progress with
         {
             CurrentPath = path,
             Error = string.IsNullOrEmpty(progress.Error) ? message : $"{progress.Error}; {message}",
-            Issues = progress.Issues.Add(new DiskScanIssue(progress.CurrentVolumeMountPoint ?? string.Empty, path, message))
+            Issues = progress.Issues.Add(new ScanIssue(path, message))
         });
     }
 
-    private void UpdateProgress(string diskId, Func<DiskScanProgress, DiskScanProgress> update)
+    private void UpdateProgress(string alias, Func<VolumeScanProgress, VolumeScanProgress> update)
     {
-        _diskProgress.AddOrUpdate(
-            diskId,
-            _ => throw new InvalidOperationException("Disk progress was not initialized."),
+        _volumeProgress.AddOrUpdate(
+            alias,
+            _ => throw new InvalidOperationException("Volume progress was not initialized."),
             (_, current) => update(current));
     }
 }
@@ -470,18 +475,17 @@ public record ScanStatus(
     string? Error,
     string? SnapshotName,
     string? SnapshotPath,
-    IReadOnlyCollection<DiskScanProgress> Disks);
+    IReadOnlyCollection<VolumeScanProgress> Volumes);
 
-public record DiskScanProgress(
-    string Id,
-    string HardwareName,
+public record VolumeScanProgress(
+    string Alias,
+    string DiskName,
     string Status,
     string CurrentPath,
     long FilesScanned,
     long FoldersScanned,
     long BytesScanned,
     string? Error,
-    string? CurrentVolumeMountPoint,
-    ImmutableList<DiskScanIssue> Issues);
+    ImmutableList<ScanIssue> Issues);
 
-public record DiskScanIssue(string VolumeMountPoint, string Path, string Message);
+public record ScanIssue(string Path, string Message);

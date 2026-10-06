@@ -22,45 +22,39 @@ public sealed class PlacementPlanner
         var targets = new List<PlanningTarget>();
         var virtualRoot = new MutablePlanningFolder(string.Empty, string.Empty);
 
-        for (var diskIndex = 0; diskIndex < snapshot.Disks.Count; diskIndex++)
+        foreach (var volume in snapshot.Volumes)
         {
-            var disk = snapshot.Disks[diskIndex];
-            for (var volumeIndex = 0; volumeIndex < disk.Volumes.Count; volumeIndex++)
+            if (!volume.IsComplete)
             {
-                var volume = disk.Volumes[volumeIndex];
-                var alias = string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias;
-                if (!volume.IsComplete)
-                {
-                    warnings.Add(new PlanningWarning($"Excluded incomplete volume {alias}."));
-                    continue;
-                }
+                warnings.Add(new PlanningWarning($"Excluded incomplete volume {volume.Alias}."));
+                continue;
+            }
 
-                if (string.IsNullOrWhiteSpace(volume.RootFolderPath) || volume.Folders is null || volume.Folders.Count == 0)
-                {
-                    warnings.Add(new PlanningWarning($"Excluded volume {alias}: its scan has no root folder data."));
-                    continue;
-                }
+            if (string.IsNullOrWhiteSpace(volume.RootFolderPath) || volume.Folders is null || volume.Folders.Count == 0)
+            {
+                warnings.Add(new PlanningWarning($"Excluded volume {volume.Alias}: its scan has no root folder data."));
+                continue;
+            }
 
-                if (volume.Capacity < 0 || volume.OtherItemsSizeOnDisk < 0)
-                {
-                    warnings.Add(new PlanningWarning($"Excluded volume {alias}: capacity or used-space data is invalid."));
-                    continue;
-                }
+            if (volume.Capacity < 0 || volume.OtherItemsSizeOnDisk < 0)
+            {
+                warnings.Add(new PlanningWarning($"Excluded volume {volume.Alias}: capacity or used-space data is invalid."));
+                continue;
+            }
 
-                try
-                {
-                    var volumeRoot = BuildVolumeTree(disk, volume);
-                    ValidateMergeCompatibility(virtualRoot, volumeRoot);
-                    MergeVolumeTree(virtualRoot, volumeRoot, disk, volume, alias);
+            try
+            {
+                var volumeRoot = BuildVolumeTree(volume);
+                ValidateMergeCompatibility(virtualRoot, volumeRoot);
+                MergeVolumeTree(virtualRoot, volumeRoot, volume);
 
-                    targets.Add(new PlanningTarget(
-                        disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath,
-                        volume.Capacity, Math.Max(0, volume.Capacity - volume.OtherItemsSizeOnDisk), volume.OtherItemsSizeOnDisk));
-                }
-                catch (InvalidDataException exception)
-                {
-                    warnings.Add(new PlanningWarning($"Excluded volume {alias}: {exception.Message}"));
-                }
+                targets.Add(new PlanningTarget(
+                    volume.Disk, volume.Alias, volume.MountPoint, volume.RootFolderPath,
+                    volume.Capacity, Math.Max(0, volume.Capacity - volume.OtherItemsSizeOnDisk), volume.OtherItemsSizeOnDisk));
+            }
+            catch (InvalidDataException exception)
+            {
+                warnings.Add(new PlanningWarning($"Excluded volume {volume.Alias}: {exception.Message}"));
             }
         }
 
@@ -69,14 +63,14 @@ public sealed class PlacementPlanner
 
         var root = Freeze(virtualRoot, snapshot.AllocationUnitSize, warnings);
         var ctx = new PlanContext(targets);
-        var otherRecord = new MatchRecord("** Other (Deferred duplicates & unmatched)", "None", 999999);
+        var otherRecord = new MatchRecord("** Other (Deferred duplicates & unmatched)", 999999);
 
         PopulateUnassigned(root, ctx);
 
         foreach (var rule in rules)
         {
             if (rule is null || rule.StartingDepth < 1) continue;
-            if (!rule.DeferPlacement && (rule.AllowedVolumeIds is null || rule.AllowedVolumeIds.Count == 0)) continue;
+            if (!rule.DeferPlacement && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) continue;
 
             string rulePath = NormalizeRulePath(rule.FullRelativePath);
             ApplyRuleRecursive(root, rule, rulePath, null, ctx, otherRecord);
@@ -134,16 +128,15 @@ public sealed class PlacementPlanner
                     }
                 }
 
-                var targetsArray = m.Targets.Select(kvp => new VolumeProvenance(kvp.Key, FindVolumeAlias(snapshot, kvp.Key), kvp.Value))
+                var targetsArray = m.Targets.Select(kvp => new VolumeProvenance(kvp.Key, kvp.Value))
                     .OrderByDescending(x => x.Size).ToImmutableArray();
 
-                var movedSourcesArray = m.MovedSources.Select(kvp => new VolumeProvenance(kvp.Key, FindVolumeAlias(snapshot, kvp.Key), kvp.Value))
+                var movedSourcesArray = m.MovedSources.Select(kvp => new VolumeProvenance(kvp.Key, kvp.Value))
                     .OrderByDescending(x => x.Size).ToImmutableArray();
 
                 return new PlannedPlacement(
                     m.Order,
                     DisplayPath(m.Path),
-                    m.RuleId,
                     logic,
                     targetsArray,
                     m.TotalSize,
@@ -184,7 +177,7 @@ public sealed class PlacementPlanner
 
             if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
             {
-                currentRecord = new MatchRecord(folder.RelativePath, rule.Id, ctx.DecisionCounter++);
+                currentRecord = new MatchRecord(folder.RelativePath, ctx.DecisionCounter++);
                 ctx.MatchRecords.Add(currentRecord);
             }
 
@@ -195,7 +188,7 @@ public sealed class PlacementPlanner
                     var loose = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
                     if (loose.Count > 0)
                     {
-                        currentRecord = new MatchRecord("<Pool Root> (Loose files)", rule.Id, ctx.DecisionCounter++);
+                        currentRecord = new MatchRecord("<Pool Root> (Loose files)", ctx.DecisionCounter++);
                         ctx.MatchRecords.Add(currentRecord);
                     }
                 }
@@ -207,7 +200,7 @@ public sealed class PlacementPlanner
                 return;
             }
 
-            var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeIds.Contains(t.VolumeId, StringComparer.OrdinalIgnoreCase)).ToList();
+            var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
 
             if (string.IsNullOrEmpty(folder.RelativePath))
             {
@@ -220,12 +213,12 @@ public sealed class PlacementPlanner
             foreach (var file in unassignedFiles)
             {
                 foreach (var copy in ctx.Unassigned[file])
-                    currentAffinity[copy.VolumeId] = currentAffinity.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
+                    currentAffinity[copy.VolumeAlias] = currentAffinity.GetValueOrDefault(copy.VolumeAlias) + copy.SizeOnDisk;
             }
 
             var bestTarget = allowedTargets
                 .Where(t => t.RemainingSpace >= logicalSize)
-                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.VolumeId))
+                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.Alias))
                 .ThenByDescending(t => t.RemainingSpace)
                 .FirstOrDefault();
 
@@ -255,7 +248,7 @@ public sealed class PlacementPlanner
             MatchRecord looseRecord = inheritedRecord!;
             if (looseRecord == null)
             {
-                looseRecord = new MatchRecord(string.IsNullOrEmpty(folder.RelativePath) ? "<Pool Root> (Loose files)" : folder.RelativePath + "\\* (Loose files)", rule.Id, ctx.DecisionCounter++);
+                looseRecord = new MatchRecord(string.IsNullOrEmpty(folder.RelativePath) ? "<Pool Root> (Loose files)" : folder.RelativePath + "\\* (Loose files)", ctx.DecisionCounter++);
                 ctx.MatchRecords.Add(looseRecord);
             }
 
@@ -264,12 +257,12 @@ public sealed class PlacementPlanner
             foreach (var file in looseFiles)
             {
                 foreach (var copy in ctx.Unassigned[file])
-                    currentAffinity[copy.VolumeId] = currentAffinity.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
+                    currentAffinity[copy.VolumeAlias] = currentAffinity.GetValueOrDefault(copy.VolumeAlias) + copy.SizeOnDisk;
             }
 
             var bestTarget = allowedTargets
                 .Where(t => t.RemainingSpace >= looseSize)
-                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.VolumeId))
+                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.Alias))
                 .ThenByDescending(t => t.RemainingSpace)
                 .FirstOrDefault();
 
@@ -283,7 +276,7 @@ public sealed class PlacementPlanner
                 {
                     var fileTarget = allowedTargets
                         .Where(t => t.RemainingSpace >= file.SizeOnDisk)
-                        .OrderByDescending(t => ctx.Unassigned[file].Any(c => string.Equals(c.VolumeId, t.VolumeId, StringComparison.OrdinalIgnoreCase)) ? 1 : 0)
+                        .OrderByDescending(t => ctx.Unassigned[file].Any(c => string.Equals(c.VolumeAlias, t.Alias, StringComparison.OrdinalIgnoreCase)) ? 1 : 0)
                         .ThenByDescending(t => t.RemainingSpace)
                         .FirstOrDefault();
 
@@ -303,7 +296,7 @@ public sealed class PlacementPlanner
 
     private static void AssignOrSplitChunk(List<PlanningFile> files, string chunkName, FilePlacementRuleConfig rule, PlanContext ctx, MatchRecord otherRecord)
     {
-        var currentRecord = new MatchRecord(chunkName, rule.Id, ctx.DecisionCounter++);
+        var currentRecord = new MatchRecord(chunkName, ctx.DecisionCounter++);
         ctx.MatchRecords.Add(currentRecord);
 
         if (rule.DeferPlacement)
@@ -312,19 +305,19 @@ public sealed class PlacementPlanner
             return;
         }
 
-        var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeIds.Contains(t.VolumeId, StringComparer.OrdinalIgnoreCase)).ToList();
+        var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
 
         long logicalSize = files.Sum(f => f.SizeOnDisk);
         var currentAffinity = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
             foreach (var copy in ctx.Unassigned[file])
-                currentAffinity[copy.VolumeId] = currentAffinity.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
+                currentAffinity[copy.VolumeAlias] = currentAffinity.GetValueOrDefault(copy.VolumeAlias) + copy.SizeOnDisk;
         }
 
         var bestTarget = allowedTargets
             .Where(t => t.RemainingSpace >= logicalSize)
-            .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.VolumeId))
+            .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.Alias))
             .ThenByDescending(t => t.RemainingSpace)
             .FirstOrDefault();
 
@@ -338,7 +331,7 @@ public sealed class PlacementPlanner
             {
                 var fileTarget = allowedTargets
                     .Where(t => t.RemainingSpace >= file.SizeOnDisk)
-                    .OrderByDescending(t => ctx.Unassigned[file].Any(c => string.Equals(c.VolumeId, t.VolumeId, StringComparison.OrdinalIgnoreCase)) ? 1 : 0)
+                    .OrderByDescending(t => ctx.Unassigned[file].Any(c => string.Equals(c.VolumeAlias, t.Alias, StringComparison.OrdinalIgnoreCase)) ? 1 : 0)
                     .ThenByDescending(t => t.RemainingSpace)
                     .FirstOrDefault();
 
@@ -357,19 +350,19 @@ public sealed class PlacementPlanner
         var copies = ctx.Unassigned[file];
         ctx.Unassigned.Remove(file);
 
-        var primaryCopy = copies.FirstOrDefault(c => string.Equals(c.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase)) ?? copies.First();
-        ctx.CopyDestinations[primaryCopy] = target.VolumeId;
+        var primaryCopy = copies.FirstOrDefault(c => string.Equals(c.VolumeAlias, target.Alias, StringComparison.OrdinalIgnoreCase)) ?? copies.First();
+        ctx.CopyDestinations[primaryCopy] = target.Alias;
 
         if (record != null)
         {
             record.TotalSize += primaryCopy.SizeOnDisk;
-            record.Targets[target.VolumeId] = record.Targets.GetValueOrDefault(target.VolumeId) + primaryCopy.SizeOnDisk;
-            record.Sources[primaryCopy.VolumeId] = record.Sources.GetValueOrDefault(primaryCopy.VolumeId) + primaryCopy.SizeOnDisk;
+            record.Targets[target.Alias] = record.Targets.GetValueOrDefault(target.Alias) + primaryCopy.SizeOnDisk;
+            record.Sources[primaryCopy.VolumeAlias] = record.Sources.GetValueOrDefault(primaryCopy.VolumeAlias) + primaryCopy.SizeOnDisk;
 
-            if (!string.Equals(primaryCopy.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(primaryCopy.VolumeAlias, target.Alias, StringComparison.OrdinalIgnoreCase))
             {
                 record.MovedSize += primaryCopy.SizeOnDisk;
-                record.MovedSources[primaryCopy.VolumeId] = record.MovedSources.GetValueOrDefault(primaryCopy.VolumeId) + primaryCopy.SizeOnDisk;
+                record.MovedSources[primaryCopy.VolumeAlias] = record.MovedSources.GetValueOrDefault(primaryCopy.VolumeAlias) + primaryCopy.SizeOnDisk;
             }
         }
 
@@ -378,7 +371,7 @@ public sealed class PlacementPlanner
             set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             ctx.AssignedVolumes[file] = set;
         }
-        set.Add(target.VolumeId);
+        set.Add(target.Alias);
         target.RemainingSpace -= primaryCopy.SizeOnDisk;
 
         foreach (var copy in copies)
@@ -406,12 +399,12 @@ public sealed class PlacementPlanner
         var remainingDeferred = new List<DeferredCopy>();
         foreach (var def in ctx.Deferred)
         {
-            var target = ctx.Targets.FirstOrDefault(t => string.Equals(t.VolumeId, def.Copy.VolumeId, StringComparison.OrdinalIgnoreCase));
+            var target = ctx.Targets.FirstOrDefault(t => string.Equals(t.Alias, def.Copy.VolumeAlias, StringComparison.OrdinalIgnoreCase));
             var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
 
-            if (target != null && target.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(target.VolumeId)))
+            if (target != null && target.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(target.Alias)))
             {
-                ctx.CopyDestinations[def.Copy] = target.VolumeId;
+                ctx.CopyDestinations[def.Copy] = target.Alias;
                 target.RemainingSpace -= def.Copy.SizeOnDisk;
 
                 if (assigned == null)
@@ -419,13 +412,13 @@ public sealed class PlacementPlanner
                     assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     ctx.AssignedVolumes[def.File] = assigned;
                 }
-                assigned.Add(target.VolumeId);
+                assigned.Add(target.Alias);
 
                 if (def.Record != null)
                 {
                     def.Record.TotalSize += def.Copy.SizeOnDisk;
-                    def.Record.Targets[target.VolumeId] = def.Record.Targets.GetValueOrDefault(target.VolumeId) + def.Copy.SizeOnDisk;
-                    def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                    def.Record.Targets[target.Alias] = def.Record.Targets.GetValueOrDefault(target.Alias) + def.Copy.SizeOnDisk;
+                    def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
                 }
             }
             else
@@ -443,13 +436,13 @@ public sealed class PlacementPlanner
         {
             var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
             var target = ctx.Targets
-                .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(t.VolumeId)))
+                .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(t.Alias)))
                 .OrderByDescending(t => t.RemainingSpace)
                 .FirstOrDefault();
 
             if (target != null)
             {
-                ctx.CopyDestinations[def.Copy] = target.VolumeId;
+                ctx.CopyDestinations[def.Copy] = target.Alias;
                 target.RemainingSpace -= def.Copy.SizeOnDisk;
 
                 if (assigned == null)
@@ -457,18 +450,18 @@ public sealed class PlacementPlanner
                     assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     ctx.AssignedVolumes[def.File] = assigned;
                 }
-                assigned.Add(target.VolumeId);
+                assigned.Add(target.Alias);
 
                 if (def.Record != null)
                 {
                     def.Record.TotalSize += def.Copy.SizeOnDisk;
-                    def.Record.Targets[target.VolumeId] = def.Record.Targets.GetValueOrDefault(target.VolumeId) + def.Copy.SizeOnDisk;
-                    def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                    def.Record.Targets[target.Alias] = def.Record.Targets.GetValueOrDefault(target.Alias) + def.Copy.SizeOnDisk;
+                    def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
 
-                    if (!string.Equals(def.Copy.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase))
+                    if (!string.Equals(def.Copy.VolumeAlias, target.Alias, StringComparison.OrdinalIgnoreCase))
                     {
                         def.Record.MovedSize += def.Copy.SizeOnDisk;
-                        def.Record.MovedSources[def.Copy.VolumeId] = def.Record.MovedSources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                        def.Record.MovedSources[def.Copy.VolumeAlias] = def.Record.MovedSources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
                     }
                 }
             }
@@ -481,57 +474,52 @@ public sealed class PlacementPlanner
 
         foreach (var def in ctx.Deferred)
         {
-            ctx.CopyDestinations[def.Copy] = def.Copy.VolumeId;
+            ctx.CopyDestinations[def.Copy] = def.Copy.VolumeAlias;
             if (def.Record != null)
             {
                 def.Record.TotalSize += def.Copy.SizeOnDisk;
-                def.Record.Targets[def.Copy.VolumeId] = def.Record.Targets.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
-                def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                def.Record.Targets[def.Copy.VolumeAlias] = def.Record.Targets.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+                def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
             }
         }
     }
 
     private static ImmutableArray<VolumePlanSummary> BuildVolumeSummaries(PoolSnapshot snapshot, PlanContext ctx)
     {
-        var targetsByVolume = ctx.Targets.ToDictionary(target => target.VolumeId, StringComparer.OrdinalIgnoreCase);
+        var targetsByAlias = ctx.Targets.ToDictionary(target => target.Alias, StringComparer.OrdinalIgnoreCase);
         var finalSizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         var provenanceSizes = new Dictionary<(string Target, string Source), long>();
 
         foreach (var target in ctx.Targets)
         {
-            finalSizes[target.VolumeId] = target.OtherItemsSizeOnDisk;
-            provenanceSizes[(target.VolumeId, target.VolumeId)] = target.OtherItemsSizeOnDisk;
+            finalSizes[target.Alias] = target.OtherItemsSizeOnDisk;
+            provenanceSizes[(target.Alias, target.Alias)] = target.OtherItemsSizeOnDisk;
         }
 
         foreach (var kvp in ctx.CopyDestinations)
         {
-            var targetVolumeId = kvp.Value;
-            finalSizes[targetVolumeId] = AddSaturated(finalSizes.GetValueOrDefault(targetVolumeId), kvp.Key.SizeOnDisk);
+            var targetAlias = kvp.Value;
+            finalSizes[targetAlias] = AddSaturated(finalSizes.GetValueOrDefault(targetAlias), kvp.Key.SizeOnDisk);
 
-            var provKey = (targetVolumeId, kvp.Key.VolumeId);
+            var provKey = (targetAlias, kvp.Key.VolumeAlias);
             provenanceSizes[provKey] = AddSaturated(provenanceSizes.GetValueOrDefault(provKey), kvp.Key.SizeOnDisk);
         }
 
         var summaries = ImmutableArray.CreateBuilder<VolumePlanSummary>();
-        for (var diskIndex = 0; diskIndex < snapshot.Disks.Count; diskIndex++)
+        foreach (var volume in snapshot.Volumes)
         {
-            var disk = snapshot.Disks[diskIndex];
-            for (var volumeIndex = 0; volumeIndex < disk.Volumes.Count; volumeIndex++)
-            {
-                var volume = disk.Volumes[volumeIndex];
-                var alias = string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias;
-                var isEligible = targetsByVolume.ContainsKey(volume.Id);
+            var isEligible = targetsByAlias.ContainsKey(volume.Alias);
 
-                var provenance = provenanceSizes
-                    .Where(pair => string.Equals(pair.Key.Target, volume.Id, StringComparison.OrdinalIgnoreCase) && pair.Value > 0)
-                    .Select(pair => new VolumeProvenance(pair.Key.Source, FindVolumeAlias(snapshot, pair.Key.Source), pair.Value))
-                    .OrderByDescending(item => item.Size).ToImmutableArray();
+            var provenance = provenanceSizes
+                .Where(pair => string.Equals(pair.Key.Target, volume.Alias, StringComparison.OrdinalIgnoreCase) && pair.Value > 0)
+                .Select(pair => new VolumeProvenance(pair.Key.Source, pair.Value))
+                .OrderByDescending(item => item.Size).ToImmutableArray();
 
-                summaries.Add(new VolumePlanSummary(
-                    volume.Id, alias, disk.HardwareName, volume.MountPoint, volume.Capacity, finalSizes.GetValueOrDefault(volume.Id),
-                    isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance));
-            }
+            summaries.Add(new VolumePlanSummary(
+                volume.Alias, volume.Disk, volume.MountPoint, volume.Capacity, finalSizes.GetValueOrDefault(volume.Alias),
+                isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance));
         }
+
         return summaries.ToImmutable();
     }
 
@@ -558,22 +546,7 @@ public sealed class PlacementPlanner
         return current;
     }
 
-    private static string FindVolumeAlias(PoolSnapshot snapshot, string volumeId)
-    {
-        for (var diskIndex = 0; diskIndex < snapshot.Disks.Count; diskIndex++)
-        {
-            var disk = snapshot.Disks[diskIndex];
-            for (var volumeIndex = 0; volumeIndex < disk.Volumes.Count; volumeIndex++)
-            {
-                var volume = disk.Volumes[volumeIndex];
-                if (!string.Equals(volume.Id, volumeId, StringComparison.OrdinalIgnoreCase)) continue;
-                return string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias;
-            }
-        }
-        return volumeId;
-    }
-
-    private static MutableVolumeFolder BuildVolumeTree(SnapshotDisk disk, SnapshotVolume volume)
+    private static MutableVolumeFolder BuildVolumeTree(SnapshotVolume volume)
     {
         var root = new MutableVolumeFolder(string.Empty, string.Empty);
         foreach (var entry in volume.Folders)
@@ -625,9 +598,9 @@ public sealed class PlacementPlanner
     }
 
     private static void MergeVolumeTree(
-        MutablePlanningFolder target, MutableVolumeFolder source, SnapshotDisk disk, SnapshotVolume volume, string alias)
+        MutablePlanningFolder target, MutableVolumeFolder source, SnapshotVolume volume)
     {
-        target.Copies.Add(new PlanningFolderCopy(disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath!, source.SizeOnDisk));
+        target.Copies.Add(new PlanningFolderCopy(volume.Disk, volume.Alias, volume.MountPoint, volume.RootFolderPath!, source.SizeOnDisk));
 
         foreach (var file in source.Files)
         {
@@ -642,7 +615,7 @@ public sealed class PlacementPlanner
             }
 
             var fileRelativePath = JoinRelativePath(source.RelativePath, file.Name);
-            mergedFile.Copies.Add(new PlanningFileCopy(disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath!, fileRelativePath, file.Size, file.SizeOnDisk));
+            mergedFile.Copies.Add(new PlanningFileCopy(volume.Disk, volume.Alias, volume.MountPoint, volume.RootFolderPath!, fileRelativePath, file.Size, file.SizeOnDisk));
         }
 
         foreach (var child in source.ChildFolders.Values)
@@ -656,7 +629,7 @@ public sealed class PlacementPlanner
                 target.ChildFolders.Add(child.Name, mergedChild);
             }
 
-            MergeVolumeTree(mergedChild, child, disk, volume, alias);
+            MergeVolumeTree(mergedChild, child, volume);
         }
     }
 
@@ -792,10 +765,9 @@ public sealed class PlacementPlanner
         public Dictionary<string, long> DeferredDueToSpace { get; } = new(StringComparer.OrdinalIgnoreCase);
     }
 
-    private sealed class MatchRecord(string path, string ruleId, int order)
+    private sealed class MatchRecord(string path, int order)
     {
         public string Path { get; } = path;
-        public string RuleId { get; } = ruleId;
         public int Order { get; } = order;
         public bool IsDeferred { get; set; }
         public long TotalSize { get; set; }
@@ -806,11 +778,9 @@ public sealed class PlacementPlanner
     }
 
     private sealed class PlanningTarget(
-        string diskId, string diskName, string volumeId, string alias, string mountPoint, string rootFolderPath, long capacity, long remainingSpace, long otherItemsSizeOnDisk)
+        string diskName, string alias, string mountPoint, string rootFolderPath, long capacity, long remainingSpace, long otherItemsSizeOnDisk)
     {
-        public string DiskId { get; } = diskId;
         public string DiskName { get; } = diskName;
-        public string VolumeId { get; } = volumeId;
         public string Alias { get; } = alias;
         public string MountPoint { get; } = mountPoint;
         public string RootFolderPath { get; } = rootFolderPath;

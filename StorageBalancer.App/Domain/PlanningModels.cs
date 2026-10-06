@@ -23,9 +23,7 @@ public sealed record PlanningFolder(
 ) : PlanningNode(RelativePath, Size, SizeOnDisk);
 
 public sealed record PlanningFileCopy(
-    string DiskId,
     string DiskName,
-    string VolumeId,
     string VolumeAlias,
     string MountPoint,
     string RootFolderPath,
@@ -37,9 +35,7 @@ public sealed record PlanningFileCopy(
 }
 
 public sealed record PlanningFolderCopy(
-    string DiskId,
     string DiskName,
-    string VolumeId,
     string VolumeAlias,
     string MountPoint,
     string RootFolderPath,
@@ -49,7 +45,6 @@ public sealed record PlanningFolderCopy(
 public sealed record PlannedPlacement(
     int Order,
     string RelativePath,
-    string RuleId,
     string LogicApplied,
     ImmutableArray<VolumeProvenance> Targets,
     long SizeOnDisk,
@@ -57,10 +52,9 @@ public sealed record PlannedPlacement(
     ImmutableArray<VolumeProvenance> Sources
 );
 
-public sealed record VolumeProvenance(string VolumeId, string Alias, long Size);
+public sealed record VolumeProvenance(string Alias, long Size);
 
 public sealed record VolumePlanSummary(
-    string VolumeId,
     string Alias,
     string DiskName,
     string MountPoint,

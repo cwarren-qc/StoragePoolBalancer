@@ -3,309 +3,951 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Configuration | Pool Survey</title>
+    <title>Storage Pool Balancer: Configuration & Simulation</title>
     <style>
-        :root { color-scheme: light; --ink:#1b2724; --muted:#687772; --paper:#f4f5ef; --surface:#fffefa; --line:#d9dfd5; --green:#286b56; --deep:#1d4d3e; --orange:#b65b38; }
+        :root { color-scheme:light; --ink:#1b2724; --muted:#687772; --paper:#f4f5ef; --surface:#fffefa; --line:#d9dfd5; --green:#286b56; --deep:#1d4d3e; --orange:#b65b38; --blue:#205e7a; }
         * { box-sizing:border-box; }
-        body { margin:0; color:var(--ink); background:var(--paper); font-family:"Segoe UI Variable","Segoe UI",sans-serif; }
-        button,input { font:inherit; }
+        body { margin:0; color:var(--ink); background-color:var(--paper); font-family:"Segoe UI Variable","Segoe UI",sans-serif; }
+        button,input,select { font:inherit; }
         button { cursor:pointer; }
-        .shell { width:min(1050px,calc(100% - 36px)); margin:0 auto; }
-        header { display:flex; justify-content:space-between; align-items:center; padding:20px 0; border-bottom:1px solid var(--line); }
-        .brand { color:var(--ink); text-decoration:none; font-size:14px; font-weight:750; }
-        .back { color:var(--green); font-size:13px; font-weight:650; text-decoration:none; }
-        main { padding:34px 0 60px; }
-        .eyebrow { color:var(--green); font-size:11px; font-weight:800; text-transform:uppercase; }
-        h1 { margin:6px 0 4px; font-size:29px; }
-        h2 { margin:0; font-size:17px; }
-        .intro,.sub { color:var(--muted); font-size:13px; }
-        .intro { margin:0 0 25px; }
-        .section-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin:24px 0 12px; }
-        .section-head p { margin:4px 0 0; color:var(--muted); font-size:12px; }
-        .button { min-height:38px; padding:0 13px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--ink); font-size:13px; font-weight:650; }
-        .button:hover { border-color:#9daea3; }
-        .primary { color:white; border-color:var(--green); background:var(--green); }
-        .primary:hover { background:var(--deep); }
-        .button:disabled { opacity:.55; cursor:wait; }
-        .panel { padding:17px 18px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
-        .mode { display:flex; align-items:center; gap:9px; font-size:13px; font-weight:650; }
-        input[type=checkbox] { width:16px; height:16px; accent-color:var(--green); }
-        .field { display:grid; gap:5px; }
-        .root-folder-field[hidden] { display:none; }
-        .field label { color:var(--muted); font-size:11px; font-weight:700; }
-        .field input { width:100%; min-height:36px; padding:7px 9px; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; outline:none; }
-        .field input:focus { border-color:var(--green); box-shadow:0 0 0 3px rgb(40 107 86 / 12%); }
-        .disk-list { display:grid; gap:10px; }
-        .disk { padding:16px 18px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
-        .disk-head,.volume-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-        .disk-head { margin-bottom:14px; }
-        .disk-title { font-size:13px; font-weight:750; }
-        .fields { display:grid; grid-template-columns:minmax(180px,.7fr) minmax(240px,1.3fr); gap:12px; }
-        .volumes { margin-top:16px; padding-top:10px; border-top:1px solid var(--line); }
-        .volume-head { margin-bottom:7px; font-size:12px; font-weight:700; }
-        .volume { display:grid; grid-template-columns:minmax(120px,.65fr) minmax(180px,1.1fr) minmax(150px,1fr) minmax(120px,.65fr) auto; align-items:end; gap:10px; padding:6px 0; }
-        .rule-list { display:grid; gap:9px; }
-        .rule { padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:7px; }
-        .rule-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
-        .rule-title { font-size:13px; font-weight:750; }
-        .rule-actions { display:flex; gap:3px; }
-        .rule-actions button { min-height:30px; padding:0 8px; border:0; background:transparent; color:var(--muted); font-size:12px; }
-        .rule-actions .remove { color:var(--orange); }
-        .rule-fields { display:grid; grid-template-columns:minmax(200px,1fr) minmax(130px,.3fr); gap:12px; }
-        .allowed-volumes-field { transition: opacity 0.2s ease; }
-        .allowed-volumes { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr)); gap:7px 14px; margin-top:4px; }
-        .volume-choice { display:flex; align-items:flex-start; gap:8px; min-width:0; width:100%; color:var(--ink); font-size:12px; overflow-wrap:anywhere; }
-        .volume-choice input { flex:none; width:16px; height:16px; min-height:16px; padding:0; border:0; background:transparent; accent-color:var(--green); }
-        .volume-choice input:disabled ~ span { color:var(--muted); }
-        .volume-choice span { min-width:0; line-height:1.45; overflow-wrap:anywhere; }
-        .unit { position:relative; }
-        .unit input { padding-right:40px; }
-        .unit span { position:absolute; top:10px; right:9px; color:var(--muted); font-size:11px; }
-        .remove { min-height:34px; padding:0 8px; border:0; background:transparent; color:var(--orange); font-size:12px; font-weight:650; }
-        .subtle { min-height:32px; padding:0 10px; font-size:12px; }
-        .empty { padding:22px; color:var(--muted); border:1px dashed #bfcabe; border-radius:7px; font-size:13px; }
-        .notice { min-height:20px; margin-top:10px; color:var(--muted); font-size:12px; }
-        .notice.error { color:#a43f2a; }
-        .actions { display:flex; justify-content:space-between; gap:12px; margin-top:18px; }
-        @media(max-width:650px) { .shell{width:calc(100% - 26px)} .fields{grid-template-columns:1fr} .volume{grid-template-columns:minmax(0,1fr) minmax(105px,.7fr)} .volume .remove{grid-column:2;justify-self:end;min-height:25px} .section-head{align-items:flex-start} }
+        .shell { width:min(1100px,calc(100% - 36px)); margin:0 auto; padding-bottom: 60px; }
+        header { display:flex; align-items:center; justify-content:space-between; padding:16px 0; border-bottom:1px solid var(--line); margin-bottom: 24px; }
+        .brand { font-size:15px; font-weight:750; color:var(--ink); text-decoration:none; display:flex; align-items:center; gap:8px;}
+        .brand-icon { background:var(--green); color:white; width:24px; height:24px; border-radius:6px; display:grid; place-items:center; font-size:12px; }
+        .nav-link { color:var(--green); font-size:13px; font-weight:650; text-decoration:none; }
+
+        details { background:var(--surface); border:1px solid var(--line); border-radius:8px; margin-bottom:16px; overflow:hidden; box-shadow:0 4px 12px rgba(0,0,0,0.02); }
+        summary { padding:16px 20px; font-size:15px; font-weight:700; cursor:pointer; background:#fbfcf8; user-select:none; border-bottom:1px solid transparent; transition:border-color 0.2s; display:flex; justify-content:space-between; align-items:center; }
+        details[open] summary { border-bottom-color:var(--line); }
+        .summary-title { display:flex; align-items:center; gap:10px; }
+        .summary-subtitle { font-size:12px; color:var(--muted); font-weight:400; }
+        .content { padding:20px; }
+
+        .btn { padding:8px 14px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--ink); font-size:12px; font-weight:650; }
+        .btn:hover { border-color:#9daea3; }
+        .btn.primary { background:var(--green); border-color:var(--green); color:white; }
+        .btn.primary:hover { background:var(--deep); }
+        .btn:disabled { opacity:0.5; cursor:wait; }
+        .btn.danger { color:var(--orange); border-color:var(--line); }
+
+        .vol-grid { display:grid; grid-template-columns: 80px 1.2fr 1.2fr 110px 120px 40px; gap:8px; align-items:center; margin-bottom:8px; }
+        @media(max-width:800px) { .vol-grid { grid-template-columns: 1fr; border-bottom:1px dashed var(--line); padding-bottom:12px; } }
+
+        .field input, .field select { width:100%; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:#fbfcf8; outline:none; font-size:13px; min-height: 32px; }
+        .field input:focus, .field select:focus { border-color:var(--green); box-shadow:0 0 0 2px rgb(40 107 86 / 12%); }
+        .field-header { font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase; margin-bottom:4px; padding-left:2px; }
+
+        .vol-headers { display:grid; grid-template-columns: 80px 1.2fr 1.2fr 110px 120px 40px; gap:8px; margin-bottom:8px; }
+        @media(max-width:800px) { .vol-headers { display:none; } }
+
+        .rule-card { border:1px solid var(--line); border-radius:6px; padding:12px; margin-bottom:10px; background:#fbfcf8; }
+        .rule-row-1 { display:grid; grid-template-columns: 1fr auto auto auto; gap:12px; align-items:center; margin-bottom:10px; }
+        .rule-row-2 { border-top:1px dashed var(--line); padding-top:10px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+        .hidden { display: none !important; }
+
+        .pill { padding:4px 10px; border-radius:99px; font-size:11px; font-weight:700; cursor:pointer; user-select:none; transition:all 0.15s; border:1px solid var(--line); background:var(--surface); color:var(--muted); }
+        .pill.active { background:var(--green); border-color:var(--green); color:white; }
+        .pill:hover:not(.active) { border-color:var(--muted); color:var(--ink); }
+
+        .scan-table { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
+        .scan-table th { text-align:left; font-size:11px; font-weight:750; color:var(--muted); text-transform:uppercase; padding:8px; border-bottom:1px solid var(--line); }
+        .scan-table td { padding:10px 8px; border-bottom:1px solid #f0f3f1; }
+        /* State Indicators */
+        .state-pill { display: inline-block; padding: 4px 10px; border-radius: 99px; font-size: 11px; font-weight: 750; white-space: nowrap; }
+        .state-complete { background: #d1e7dd; color: #0f5132; }
+        .state-failed { background: #f8d7da; color: #842029; }
+        .state-text { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; white-space: nowrap; color: var(--ink); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .dot-scan { background: var(--green); box-shadow: 0 0 0 0 rgba(40,107,86,0.4); animation: pulse 1.5s infinite; }
+        .dot-wait { background: #a0aba6; } /* Neutral gray for waiting */
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(40,107,86,0.5); } 70% { box-shadow: 0 0 0 5px rgba(40,107,86,0); } 100% { box-shadow: 0 0 0 0 rgba(40,107,86,0); } }
+
+        .toolbar { display:flex; gap:12px; align-items:center; justify-content:space-between; margin-bottom:16px; }
+        .unit-input { position:relative; }
+        .unit-input input { padding-right:32px; }
+        .unit-input span { position:absolute; right:8px; top:8px; font-size:11px; color:var(--muted); }
+        .remove-btn { background:none; border:none; color:var(--orange); font-size:18px; font-weight:bold; cursor:pointer; padding:4px; opacity:0.6; }
+        .remove-btn:hover { opacity:1; }
+        .notice { font-size:13px; margin-bottom:12px; padding:12px 16px; border-radius:6px; display:none; }
+        .notice.error { color:#842029; background-color:#f8d7da; border:1px solid #f5c2c7; display:block; }
+        .notice.success { color:#0f5132; background-color:#d1e7dd; border:1px solid #badbcc; display:block; }
+
+        /* Nested Collapsables */
+        .sub-details { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 20px; background: #fffefa; }
+        .sub-details > summary { padding: 12px 16px; font-size: 14px; background: color-mix(in srgb, var(--paper) 60%, transparent); border-radius: 6px; }
+        .sub-details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--line); }
+        .sub-details:not([open]) > summary .btn { display: none; }
+        .sub-content { padding: 16px; }
+
+        /* Ordering Buttons */
+        .move-btn { background: none; border: none; font-size: 14px; cursor: pointer; color: var(--muted); padding: 2px 4px; border-radius: 4px; }
+        .move-btn:hover { color: var(--ink); background: var(--line); }
+        .rule-row-1 { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 12px; align-items: center; margin-bottom: 10px; }
+
+        /* Drag and Drop styles */
+        .drag-handle { cursor: grab; padding: 0 4px; color: var(--muted); font-size: 16px; user-select: none; }
+        .drag-handle:active { cursor: grabbing; }
+        .rule-card.dragging { opacity: 0.4; border: 1px dashed var(--muted); }
+        .rule-card.drag-over { box-shadow: 0 -3px 0 var(--green); z-index: 1; position: relative; }
+        /* This prevents drag flickering when hovering over inputs inside the card */
+        body.is-dragging .rule-card * { pointer-events: none; }
+
+        /* Simulation Table Extras */
+        .sortable { cursor: pointer; user-select: none; }
+        .sortable:hover { color: var(--ink) !important; }
+        .util-bar-bg { flex: 1; background: var(--line); height: 6px; border-radius: 3px; overflow: hidden; max-width: 150px; }
+        .util-bar-fill { background: var(--green); height: 100%; transition: width 0.3s; }
+
+        /* Simulation & Preview Rich Visuals */
+        .plan-table { width:100%; border-collapse:collapse; font-size:12px; text-align:left; }
+        .plan-table th { padding:8px 12px; font-size:10px; font-weight:750; color:var(--muted); text-transform:uppercase; border-bottom:1px solid var(--line); }
+        .plan-table td { padding:10px 12px; border-bottom:1px solid #f0f3f1; vertical-align: top; }
+        .plan-muted { color:var(--muted); }
+        .reason-badge { display:inline-block; padding:3px 6px; background:#e9eee3; color:var(--deep); border-radius:4px; font-size:10px; font-weight:700; white-space:nowrap; }
+        .target-col { display:flex; align-items:center; gap:6px; white-space:nowrap; }
+        .transfer-swatch { width:9px; height:9px; flex:none; background:var(--source-color); border-radius:2px; display:inline-block; }
+
+        .volume-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr)); gap:10px; margin-top:15px; }
+        .volume-card { min-width:0; padding:0; overflow:hidden; color:var(--ink); text-align:left; background:var(--surface); border:1px solid var(--line); border-top:5px solid var(--volume-color); border-radius:7px; }
+        .volume-card-head { display:flex; justify-content:space-between; gap:12px; padding:12px 13px 8px; background:color-mix(in srgb,var(--volume-color) 11%,var(--surface)); border-bottom:1px solid color-mix(in srgb,var(--volume-color) 22%,var(--line)); }
+        .volume-alias { font-size:14px; font-weight:750; }
+        .volume-size { text-align:right; white-space:nowrap; font-size:12px; font-variant-numeric:tabular-nums; }
+        .provenance-bar { display:flex; height:19px; margin:6px 13px 8px; overflow:hidden; background:#e4e8e1; border-radius:3px; }
+        .provenance-segment { min-width:1px; height:100%; }
+        .provenance-legend { display:flex; flex-wrap:wrap; gap:5px 11px; padding:0 13px 11px; }
+        .provenance-key { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:10px; }
+        .volume-state { padding:0 13px 11px; color:var(--orange); font-size:11px; }
     </style>
 </head>
 <body>
-    <header class="shell"><a class="brand" href="/">Pool Survey</a><a class="back" href="/">Back to overview</a></header>
+    <header class="shell">
+        <a href="/" class="brand"><span class="brand-icon">S</span> Storage Pool Balancer: Configuration & Simulation</a>
+        <a href="/" class="nav-link">Back to 1-Click Runner</a>
+    </header>
+
     <main class="shell">
-        <div class="eyebrow">Settings</div>
-        <h1>Configuration</h1>
-        <p class="intro">Set the pool mode, snapshot destination, and physical disk volumes.</p>
+        <!-- CONFIGURATION -->
+        <details id="details-config" open>
+            <summary>
+                <div class="summary-title">⚙️ Configuration</div>
+                <button class="btn primary" id="btn-save-config" onclick="event.preventDefault(); saveConfig();">Save Configuration</button>
+            </summary>
+            <div class="content">
+                <div id="config-notice" class="notice"></div>
 
-        <section class="panel">
-            <div class="field"><label for="snapshots-folder">Snapshots folder</label><input id="snapshots-folder" placeholder="Enter a folder path" required></div>
-            <p class="sub">Relative paths are resolved from the application folder. Absolute paths are also accepted.</p>
-            <label class="mode"><input id="drive-pool-mode" type="checkbox"> DrivePool mode</label>
-        </section>
-
-        <section>
-            <div class="section-head">
-                <div><h2>Physical disks</h2><p>Volumes on each physical disk are scanned sequentially.</p></div>
-                <button class="button" id="add-disk" type="button">+ Add disk</button>
-            </div>
-            <div class="disk-list" id="disk-list"></div>
-
-            <div class="section-head">
-                <div><h2>File placement rules</h2><p>Rules run from top to bottom; put more specific paths before broad rules.</p></div>
-                <button class="button" id="add-rule" type="button">+ Add rule</button>
-            </div>
-            <div class="rule-list" id="rule-list"></div>
-
-            <div class="notice" id="notice" role="status" aria-live="polite"></div>
-            <div class="actions"><a class="back" href="/">Cancel</a><button class="button primary" id="save" type="button">Save configuration</button></div>
-        </section>
-    </main>
-    <script>
-        const diskList = document.getElementById('disk-list');
-        const ruleList = document.getElementById('rule-list');
-        const notice = document.getElementById('notice');
-        const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' })[character]);
-        const makeId = () => globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-
-        function volumeTemplate(volume = {}, diskIndex = 0, volumeIndex = 0) {
-            const capacity = Number(volume.capacity || 0) / (1024 ** 3);
-            const displayedCapacity = Number.isFinite(capacity) ? Number(capacity.toFixed(3)) : 0;
-            return `<div class="volume">
-                <input type="hidden" data-field="id" value="${escapeHtml(volume.id || makeId())}">
-            <div class="field"><label>Alias</label><input data-field="alias" value="${escapeHtml(volume.alias)}" placeholder="D${diskIndex + 1}-V${volumeIndex + 1}"></div>
-                <div class="field"><label>Mount point</label><input data-field="mountPoint" value="${escapeHtml(volume.mountPoint)}" placeholder="E:\\ or /mnt/media" required></div>
-                <div class="field root-folder-field"><label>Root folder (relative)</label><input data-field="rootFolderRelativePath" value="${escapeHtml(volume.rootFolderRelativePath)}" placeholder="Blank scans the volume root"></div>
-                <div class="field"><label>Capacity</label><div class="unit"><input data-field="capacity" type="number" min="0" step="0.001" value="${displayedCapacity}"><span>GiB</span></div></div>
-                <button class="remove" data-action="remove-volume" type="button">Remove</button>
-            </div>`;
-        }
-
-        function diskTemplate(disk = {}, index = 0) {
-            const volumes = disk.volumes?.length ? disk.volumes : [{ id:makeId(), mountPoint:'', capacity:0 }];
-            return `<article class="disk" data-disk>
-                <input type="hidden" data-field="id" value="${escapeHtml(disk.id || makeId())}">
-                <div class="disk-head"><div class="disk-title">Physical disk ${index + 1}</div><button class="remove" data-action="remove-disk" type="button">Remove disk</button></div>
-                <div class="fields">
-                    <div class="field"><label>Disk name</label><input data-field="hardwareName" value="${escapeHtml(disk.hardwareName)}" placeholder="Media disk 1" required></div>
-                    <div class="field"><label>Notes or hardware identifier</label><input data-field="description" value="${escapeHtml(disk.description)}" placeholder="Optional"></div>
+                <div class="toolbar" style="margin-bottom:24px;">
+                    <div style="display:flex; gap:16px; width:100%;">
+                        <div class="field" style="flex:1;">
+                            <div class="field-header">Snapshots Folder</div>
+                            <input type="text" id="cfg-snapshot-dir" placeholder="E:\Snapshots">
+                        </div>
+                        <div class="field" style="display:flex; align-items:center; gap:8px; margin-top:16px;">
+                            <input type="checkbox" id="cfg-drivepool" style="width:16px;">
+                            <label for="cfg-drivepool" style="font-size:13px; font-weight:600; cursor:pointer;">DrivePool Mode</label>
+                        </div>
+                    </div>
                 </div>
-                <div class="volumes"><div class="volume-head"><span>Volumes</span><button class="button subtle" data-action="add-volume" type="button">+ Add volume</button></div><div data-volumes>${volumes.map((volume, volumeIndex) => volumeTemplate(volume, index, volumeIndex)).join('')}</div></div>
-            </article>`;
-        }
 
-        function render(config) {
-            const disks = config.disks || [];
-            diskList.innerHTML = disks.length ? disks.map(diskTemplate).join('') : '<div class="empty">No disks configured.</div>';
-            document.getElementById('snapshots-folder').value = config.snapshotsFolder || '';
-            document.getElementById('drive-pool-mode').checked = Boolean(config.drivePoolMode);
-            syncRootFolderFields();
-            renderRules(config.filePlacementRules || []);
-        }
-
-        function renderRules(rules) {
-            const volumes = [];
-            [...diskList.querySelectorAll('[data-disk]')].forEach((diskElement, diskIndex) => {
-                const diskName = diskElement.querySelector('[data-field="hardwareName"]').value.trim() || `Physical disk ${diskIndex + 1}`;
-                [...diskElement.querySelectorAll('.volume')].forEach((volumeElement, volumeIndex) => {
-                    volumes.push({
-                        id:volumeElement.querySelector('[data-field="id"]').value,
-                        alias:volumeElement.querySelector('[data-field="alias"]').value.trim() || `D${diskIndex + 1}-V${volumeIndex + 1}`
-                    });
-                });
-            });
-            ruleList.innerHTML = rules.length ? rules.map((rule, index) => {
-                const selectedVolumeIds = new Set(rule.allowedVolumeIds || []);
-                const volumeChoices = volumes.length
-                    ? volumes.map(volume => `<label class="volume-choice"><input type="checkbox" data-allowed-volume="${escapeHtml(volume.id)}" ${selectedVolumeIds.has(volume.id) ? 'checked' : ''}><span>${escapeHtml(volume.alias)}</span></label>`).join('')
-                    : '<span class="sub">Add a volume before selecting allowed targets.</span>';
-                return `<article class="rule" data-rule>
-                    <input type="hidden" data-rule-field="id" value="${escapeHtml(rule.id || makeId())}">
-                    <div class="rule-head"><div class="rule-title">Rule ${index + 1}</div><div class="rule-actions">
-                        <button type="button" data-rule-action="up" aria-label="Move rule up" title="Move rule up">&#8593;</button>
-                        <button type="button" data-rule-action="down" aria-label="Move rule down" title="Move rule down">&#8595;</button>
-                        <button class="remove" type="button" data-rule-action="remove">Remove</button>
-                    </div></div>
-                    <div class="rule-fields" style="margin-bottom:12px">
-                        <div class="field"><label>Relative path</label><input data-rule-field="fullRelativePath" value="${escapeHtml(rule.fullRelativePath)}" placeholder="TV Series"></div>
-                        <div class="field"><label>Starting depth</label><input data-rule-field="startingDepth" type="number" min="1" step="1" value="${Number(rule.startingDepth || 1)}"></div>
+                <!-- VOLUMES SUB-SECTION -->
+                <details class="sub-details" open>
+                    <summary>
+                        <span>Volumes</span>
+                        <button class="btn" onclick="event.preventDefault(); addVolume()">+ Add Volume</button>
+                    </summary>
+                    <div class="sub-content">
+                        <div class="vol-headers" id="vol-headers">
+                            <div class="field-header">Alias</div>
+                            <div class="field-header">Mount Point</div>
+                            <div class="field-header root-header">Root Folder</div>
+                            <div class="field-header">Capacity</div>
+                            <div class="field-header">Physical Disk</div>
+                            <div></div>
+                        </div>
+                        <div id="volumes-container"></div>
                     </div>
-                    <div class="field" style="margin-bottom:12px">
-                        <label class="mode"><input type="checkbox" data-rule-field="deferPlacement" ${rule.deferPlacement ? 'checked' : ''}> Defer placement (Handle at the end)</label>
+                </details>
+
+                <!-- RULES SUB-SECTION -->
+                <details class="sub-details" open>
+                    <summary>
+                        <span>Balancing Rules</span>
+                        <button class="btn" onclick="event.preventDefault(); addRule()">+ Add Rule</button>
+                    </summary>
+                    <div class="sub-content">
+                        <div id="rules-container"></div>
                     </div>
-                    <div class="field allowed-volumes-field"><label>Allowed volumes</label><div class="allowed-volumes">${volumeChoices}</div></div>
-                </article>`;
-            }).join('') : '<div class="empty">No placement rules configured.</div>';
-            syncRuleFields();
+                </details>
+
+            </div>
+        </details>
+
+        <!-- STATE SCANNER -->
+        <details id="details-scan">
+            <summary>
+                <div class="summary-title">🔍 State Scanner <span class="summary-subtitle" id="scan-subtitle">Ready</span></div>
+            </summary>
+            <div class="content">
+                <div class="toolbar">
+                    <div class="field" style="width:300px;">
+                        <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)">
+                    </div>
+                    <div style="display:flex; gap:8px;">
+                        <button class="btn danger" id="btn-scan-cancel" onclick="cancelScan()" hidden>Cancel Scan</button>
+                        <button class="btn primary" id="btn-scan-start" onclick="startScan()">Start Pool Scan</button>
+                    </div>
+                </div>
+                <table class="scan-table">
+                <thead>
+                        <tr>
+                            <th style="width: 70px;">Volume</th>
+                            <th style="width: 120px;">State</th>
+                            <th style="width: 80px; text-align:right;">Files</th>
+                            <th style="width: 80px; text-align:right;">Folders</th>
+                            <th style="width: 100px; text-align:right;">Logical Data</th>
+                            <th style="width: auto; padding-left: 16px;">Current Path</th>
+                        </tr>
+                    </thead>
+                        <tbody id="scan-tbody">
+                        <tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">No scan running.</td></tr>
+                    </tbody>
+                </table>
+                <div id="scan-notice" class="notice"></div>
+            </div>
+        </details>
+
+        <!-- SIMULATION & PREVIEW -->
+        <details id="details-plan">
+            <summary>
+                <div class="summary-title">📊 Simulation & Preview</div>
+            </summary>
+            <div class="content">
+                <div class="toolbar">
+                    <div class="field" style="width:300px;">
+                        <select id="plan-snapshot-select"><option value="">Loading snapshots...</option></select>
+                    </div>
+                    <button class="btn primary" id="btn-plan-generate" onclick="generatePlan()">Generate Preview</button>
+                </div>
+                <div id="plan-notice" class="notice"></div>
+
+                <div id="plan-results" style="margin-top:20px;"></div>
+            </div>
+        </details>
+    </main>
+
+    <script>
+        const escapeHtml = str => String(str ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        const formatBytes = b => { if(!b) return '0 B'; const u=['B','KiB','MiB','GiB','TiB']; const i=Math.min(Math.floor(Math.log(b)/Math.log(1024)), u.length-1); return `${(b/(1024**i)).toFixed(i>1?1:0)} ${u[i]}`; };
+
+        let state = { config: { volumes: [], filePlacementRules: [] }, scanPolling: false };
+        let draggedRuleIndex = null;
+        let activePlan = null;
+        let placementSortCol = 'path';
+        let placementSortDesc = false;
+        let showStayedIntact = false;
+        let activeVolumeColors = new Map();
+
+        // ================= CONFIGURATION =================
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if(!res.ok) throw new Error("Failed to load config");
+                state.config = await res.json();
+
+                state.config.volumes = state.config.volumes || [];
+                state.config.filePlacementRules = state.config.filePlacementRules || [];
+
+                document.getElementById('cfg-snapshot-dir').value = state.config.snapshotsFolder || '';
+                document.getElementById('cfg-drivepool').checked = state.config.drivePoolMode;
+
+                renderVolumes();
+                renderRules();
+                toggleRootFolders();
+                document.getElementById('cfg-drivepool').addEventListener('change', toggleRootFolders);
+            } catch (err) {
+                showConfigNotice(err.message, true);
+            }
         }
 
-        function collectRules() {
-            return [...ruleList.querySelectorAll('[data-rule]')].map(element => {
-                const isDeferred = element.querySelector('[data-rule-field="deferPlacement"]').checked;
+        function toggleRootFolders() {
+            const isDp = document.getElementById('cfg-drivepool').checked;
+            document.querySelectorAll('.root-header, .root-cell').forEach(el => el.style.display = isDp ? 'none' : 'block');
+        }
+
+        function renderVolumes() {
+            const container = document.getElementById('volumes-container');
+            if(!state.config.volumes.length) { container.innerHTML = '<div style="color:var(--muted); font-size:13px;">No volumes defined.</div>'; return; }
+
+            container.innerHTML = state.config.volumes.map((v, i) => `
+                <div class="vol-grid" data-index="${i}">
+                    <div class="field"><input type="text" class="v-alias" value="${escapeHtml(v.alias)}" placeholder="M01"></div>
+                    <div class="field"><input type="text" class="v-mount" value="${escapeHtml(v.mountPoint)}" placeholder="R:\\"></div>
+                    <div class="field root-cell"><input type="text" class="v-root" value="${escapeHtml(v.rootFolderRelativePath)}" placeholder="(Root)"></div>
+                    <div class="field unit-input"><input type="number" class="v-cap" step="0.1" value="${(v.capacity / (1024**3)).toFixed(1)}"><span>GiB</span></div>
+                    <div class="field"><input type="text" class="v-disk" value="${escapeHtml(v.disk)}" placeholder="(Optional)"></div>
+                    <button class="remove-btn" onclick="if(confirm('Are you sure you want to delete this volume?')) removeVolume(${i})" title="Remove Volume">×</button>
+                </div>
+            `).join('');
+            toggleRootFolders();
+        }
+
+        function syncDOMToState() {
+            // Save volumes
+            const volRows = document.querySelectorAll('.vol-grid');
+            state.config.volumes = Array.from(volRows).map(row => {
+                const capStr = row.querySelector('.v-cap').value;
                 return {
-                    id:element.querySelector('[data-rule-field="id"]').value,
-                    fullRelativePath:element.querySelector('[data-rule-field="fullRelativePath"]').value.trim().replace(/\//g, '\\').replace(/\\+/g, '\\').replace(/^\\|\\$/g, ''),
-                    startingDepth:Number(element.querySelector('[data-rule-field="startingDepth"]').value),
-                    deferPlacement:isDeferred,
-                    allowedVolumeIds:isDeferred ? [] : [...element.querySelectorAll('[data-allowed-volume]:checked')].map(input => input.dataset.allowedVolume)
+                    alias: row.querySelector('.v-alias').value.trim(),
+                    mountPoint: row.querySelector('.v-mount').value.trim(),
+                    rootFolderRelativePath: row.querySelector('.v-root') ? row.querySelector('.v-root').value.trim() : '',
+                    capacity: capStr ? Math.round(parseFloat(capStr) * (1024**3)) : 0,
+                    disk: row.querySelector('.v-disk').value.trim()
+                };
+            });
+
+            // Save rules
+            const ruleCards = document.querySelectorAll('.rule-card');
+            state.config.filePlacementRules = Array.from(ruleCards).map(card => {
+                const isDef = card.querySelector('.r-def').checked;
+                const allowedAliases = isDef ? [] : Array.from(card.querySelectorAll('.pill.active')).map(p => p.textContent.trim());
+                return {
+                    fullRelativePath: card.querySelector('.r-path').value.trim().replace(/\//g, '\\'),
+                    startingDepth: parseInt(card.querySelector('.r-depth').value) || 1,
+                    deferPlacement: isDef,
+                    allowedVolumeAliases: allowedAliases
                 };
             });
         }
 
-        function syncRootFolderFields() {
-            const hidden = document.getElementById('drive-pool-mode').checked;
-            diskList.querySelectorAll('.root-folder-field').forEach(field => field.hidden = hidden);
+        function addVolume() {
+            syncDOMToState();
+            state.config.volumes.push({ alias: '', mountPoint: '', capacity: 0, rootFolderRelativePath: '', disk: '' });
+            renderVolumes();
+            renderRules();
         }
 
-        function syncRuleFields() {
-            ruleList.querySelectorAll('[data-rule]').forEach(rule => {
-                const deferred = rule.querySelector('[data-rule-field="deferPlacement"]').checked;
-                rule.querySelectorAll('.allowed-volumes-field input').forEach(cb => cb.disabled = deferred);
-                rule.querySelector('.allowed-volumes-field').style.opacity = deferred ? '0.5' : '1';
-            });
+        function removeVolume(idx) {
+            syncDOMToState();
+            state.config.volumes.splice(idx, 1);
+            renderVolumes();
+            renderRules();
         }
 
-        async function request(url, options) {
-            const response = await fetch(url, options);
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
-            return data;
+        // --- Drag and Drop Handlers ---
+        function handleDragStart(e, idx) {
+            syncDOMToState(); // Save inputs before reordering
+            draggedRuleIndex = idx;
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', idx);
+            // setTimeout prevents the element from visually disappearing while dragging
+            setTimeout(() => {
+                e.target.classList.add('dragging');
+                document.body.classList.add('is-dragging');
+            }, 0);
         }
 
-        async function load() {
-            try { render(await request('/api/config')); notice.textContent = 'Configuration loaded.'; }
-            catch (error) { notice.textContent = error.message; notice.classList.add('error'); }
+        function handleDragOver(e) {
+            e.preventDefault(); // Necessary to allow dropping
+            e.dataTransfer.dropEffect = 'move';
+            const card = e.target.closest('.rule-card');
+            if (card && card.dataset.index != draggedRuleIndex) {
+                card.classList.add('drag-over');
+            }
+            return false;
         }
 
-        function collect() {
-            const disks = [...diskList.querySelectorAll('[data-disk]')].map(element => {
-                const field = name => element.querySelector(`[data-field="${name}"]`).value;
-                const volumes = [...element.querySelectorAll('.volume')].map(volume => {
-                    const value = name => volume.querySelector(`[data-field="${name}"]`).value;
-                    const capacity = Number(value('capacity'));
-                    if (!Number.isFinite(capacity) || capacity < 0) throw new Error('Volume capacity must be zero or greater.');
-                    return { id:value('id'), alias:value('alias').trim(), mountPoint:value('mountPoint').trim(), capacity:Math.round(capacity * (1024 ** 3)), rootFolderRelativePath:value('rootFolderRelativePath').trim() };
-                });
-                return { id:field('id'), hardwareName:field('hardwareName').trim(), description:field('description').trim(), volumes };
-            });
-            if (disks.some(disk => !disk.hardwareName || !disk.volumes.length || disk.volumes.some(volume => !volume.mountPoint)))
-                throw new Error('Enter a disk name and at least one mounted volume for each disk.');
-
-            const filePlacementRules = collectRules();
-            if (filePlacementRules.some(rule => !Number.isInteger(rule.startingDepth) || rule.startingDepth < 1 || (!rule.deferPlacement && !rule.allowedVolumeIds.length) || rule.fullRelativePath.split('\\').some(part => part === '..')))
-                throw new Error('Each placement rule needs a valid depth and at least one allowed volume (unless deferred). Paths cannot move above the pool root.');
-
-            const snapshotsFolder = document.getElementById('snapshots-folder').value.trim();
-            if (!snapshotsFolder) throw new Error('Choose a snapshots folder.');
-
-            return { drivePoolMode:document.getElementById('drive-pool-mode').checked, snapshotsFolder, disks, filePlacementRules };
+        function handleDragLeave(e) {
+            const card = e.target.closest('.rule-card');
+            if (card) {
+                card.classList.remove('drag-over');
+            }
         }
 
-        async function save() {
+        function handleDrop(e, targetIdx) {
+            e.stopPropagation();
+            e.preventDefault();
+            if (draggedRuleIndex !== null && draggedRuleIndex !== targetIdx) {
+                const rules = state.config.filePlacementRules;
+                const [movedRule] = rules.splice(draggedRuleIndex, 1);
+                rules.splice(targetIdx, 0, movedRule);
+                renderRules();
+            }
+            return false;
+        }
+
+        function handleDragEnd(e) {
+            e.target.classList.remove('dragging');
+            document.body.classList.remove('is-dragging');
+            document.querySelectorAll('.rule-card').forEach(c => c.classList.remove('drag-over'));
+            draggedRuleIndex = null;
+        }
+
+        // --- Rule Rendering ---
+        function renderRules() {
+            const container = document.getElementById('rules-container');
+            const rules = state.config.filePlacementRules;
+
+            if (!rules.length) { container.innerHTML = '<div style="color:var(--muted); font-size:13px;">No rules defined.</div>'; return; }
+
+            const aliases = state.config.volumes.map(v => v.alias || '(Empty)');
+
+            container.innerHTML = rules.map((r, i) => {
+                const isDef = r.deferPlacement;
+                const allowed = new Set(r.allowedVolumeAliases || []);
+
+                const pills = aliases.map(a =>
+                    `<div class="pill ${allowed.has(a)?'active':''}" onclick="togglePill(this)">${escapeHtml(a)}</div>`
+                ).join('');
+
+                return `
+                <div class="rule-card" data-index="${i}" draggable="true"
+                     ondragstart="handleDragStart(event, ${i})" ondragover="handleDragOver(event)"
+                     ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, ${i})" ondragend="handleDragEnd(event)">
+                    <div class="rule-row-1">
+                        <div style="display:flex; gap:2px; padding-right:8px; border-right:1px solid var(--line); align-items:center;">
+                            <div class="drag-handle" title="Drag to reorder">⋮⋮</div>
+                            <button class="move-btn" onclick="moveRule(${i}, 'up')" title="Move Up">↑</button>
+                            <button class="move-btn" onclick="moveRule(${i}, 'down')" title="Move Down">↓</button>
+                        </div>
+                        <div class="field"><input type="text" class="r-path" value="${escapeHtml(r.fullRelativePath)}" placeholder="Path (e.g. Movies)"></div>
+                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" class="r-def" ${isDef?'checked':''} onchange="toggleRuleDef(this)"> Defer placement
+                        </label>
+                        <div class="field r-depth-container" style="display:${isDef ? 'none' : 'flex'}; align-items:center; gap:6px;">
+                            <span style="font-size:12px; color:var(--muted);">Depth:</span>
+                            <input type="number" class="r-depth" min="1" value="${r.startingDepth}" style="width:60px;">
+                        </div>
+                        <button class="remove-btn" onclick="if(confirm('Are you sure you want to delete this rule?')) removeRule(${i})" title="Remove Rule">×</button>
+                    </div>
+                    <div class="rule-row-2 ${isDef?'hidden':''}">
+                        <span style="font-size:11px; color:var(--muted); margin-right:8px;">TARGETS:</span>
+                        ${pills || '<span style="font-size:11px; color:var(--muted);">Add a volume first</span>'}
+                    </div>
+                </div>
+                `;
+            }).join('');
+        }
+
+        function togglePill(el) {
+            el.classList.toggle('active');
+        }
+
+        function toggleRuleDef(cb) {
+            const card = cb.closest('.rule-card');
+            const row2 = card.querySelector('.rule-row-2');
+            const depthContainer = card.querySelector('.r-depth-container');
+
+            if (cb.checked) {
+                row2.classList.add('hidden');
+                depthContainer.style.display = 'none';
+            } else {
+                row2.classList.remove('hidden');
+                depthContainer.style.display = 'flex';
+            }
+        }
+
+        function addRule() {
+            syncDOMToState();
+            state.config.filePlacementRules.push({ fullRelativePath: '', startingDepth: 1, deferPlacement: false, allowedVolumeAliases: [] });
+            renderRules();
+        }
+
+        function removeRule(idx) {
+            syncDOMToState();
+            state.config.filePlacementRules.splice(idx, 1);
+            renderRules();
+        }
+
+        function moveRule(idx, action) {
+            syncDOMToState();
+            const rules = state.config.filePlacementRules;
+            if (rules.length <= 1) return;
+
+            const rule = rules.splice(idx, 1)[0];
+
+            if (action === 'up') {
+                rules.splice(Math.max(0, idx - 1), 0, rule);
+            } else if (action === 'down') {
+                rules.splice(Math.min(rules.length, idx + 1), 0, rule);
+            } else if (action === 'top') {
+                rules.unshift(rule);
+            } else if (action === 'bottom') {
+                rules.push(rule);
+            }
+
+            renderRules();
+        }
+
+        function showConfigNotice(msg, isError) {
+            const el = document.getElementById('config-notice');
+            el.textContent = msg;
+            el.className = `notice ${isError ? 'error' : 'success'}`;
+            // Clear it after 6 seconds
+            setTimeout(() => { if (el.textContent === msg) el.className = 'notice'; }, 6000);
+        }
+
+        async function saveConfig() {
+            const btn = document.getElementById('btn-save-config');
+            btn.disabled = true;
             try {
-                const config = collect();
-                await request('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(config) });
-                const savedConfig = await request('/api/config');
-                const savedRulesById = new Map((savedConfig.filePlacementRules || []).map(rule => [rule.id, rule]));
-                const rulesWereSaved = config.filePlacementRules.every(rule => {
-                    const savedRule = savedRulesById.get(rule.id);
-                    return savedRule &&
-                        savedRule.fullRelativePath === rule.fullRelativePath &&
-                        savedRule.startingDepth === rule.startingDepth &&
-                        savedRule.deferPlacement === rule.deferPlacement &&
-                        JSON.stringify(savedRule.allowedVolumeIds || []) === JSON.stringify(rule.allowedVolumeIds);
-                });
-                if (!rulesWereSaved) throw new Error('The running app did not save the placement rules. Stop it, rebuild, and launch the latest version before saving again.');
-                notice.classList.remove('error');
-                notice.textContent = `Configuration saved with ${config.filePlacementRules.length} placement rule${config.filePlacementRules.length === 1 ? '' : 's'}.`;
-            } catch (error) {
-                notice.textContent = error.message;
-                notice.classList.add('error');
+                syncDOMToState();
+                const rules = state.config.filePlacementRules;
+
+                for (let i = 0; i < rules.length; i++) {
+                    const r = rules[i];
+                    if (!r.deferPlacement && r.allowedVolumeAliases.length === 0) {
+                        throw new Error(`Rule ${i + 1} (Path: '${r.fullRelativePath}') is missing targets. Select at least one volume, or check 'Defer placement'.`);
+                    }
+                }
+
+                const payload = {
+                    drivePoolMode: document.getElementById('cfg-drivepool').checked,
+                    snapshotsFolder: document.getElementById('cfg-snapshot-dir').value.trim(),
+                    volumes: state.config.volumes,
+                    filePlacementRules: rules
+                };
+
+                const res = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+
+                const text = await res.text();
+                let data = {};
+                try { data = JSON.parse(text); } catch(e) {}
+
+                if(!res.ok) throw new Error(data.Error || data.error || data.title || `Failed to save configuration (Status ${res.status}).`);
+
+                showConfigNotice("Configuration saved successfully.", false);
+                await loadConfig();
+            } catch (err) {
+                showConfigNotice(err.message, true);
+            } finally {
+                btn.disabled = false;
             }
         }
 
-        diskList.addEventListener('click', event => {
-            const button = event.target.closest('[data-action]');
-            if (!button) return;
-            const disk = button.closest('[data-disk]');
-            if (button.dataset.action === 'remove-disk') disk.remove();
-            if (button.dataset.action === 'add-volume') {
-                const diskIndex = [...diskList.querySelectorAll('[data-disk]')].indexOf(disk);
-                const volumeIndex = disk.querySelectorAll('.volume').length;
-                disk.querySelector('[data-volumes]').insertAdjacentHTML('beforeend', volumeTemplate({}, diskIndex, volumeIndex));
-                syncRootFolderFields();
+        // ================= SCANNER =================
+        async function fetchScanStatus() {
+            try {
+                const res = await fetch('/api/scan/status');
+                const status = await res.json();
+                renderScanStatus(status);
+
+                if (status.isScanning && !state.scanPolling) {
+                    state.scanPolling = true;
+                    pollScan();
+                }
+            } catch (err) {
+                document.getElementById('scan-notice').textContent = err.message;
             }
-            if (button.dataset.action === 'remove-volume') button.closest('.volume').remove();
-            if (!diskList.querySelector('[data-disk]')) diskList.innerHTML = '<div class="empty">No disks configured.</div>';
-            [...diskList.querySelectorAll('.disk-title')].forEach((title, index) => title.textContent = `Physical disk ${index + 1}`);
-            renderRules(collectRules());
+        }
+
+        function pollScan() {
+            setTimeout(async () => {
+                await fetchScanStatus();
+                if (state.scanPolling) pollScan();
+            }, 1000);
+        }
+
+        function renderScanStatus(status) {
+            document.getElementById('btn-scan-start').hidden = status.isScanning;
+            document.getElementById('btn-scan-cancel').hidden = !status.isScanning;
+            document.getElementById('scan-name').disabled = status.isScanning;
+
+            if(status.isScanning) {
+                document.getElementById('scan-subtitle').textContent = "Scanning in progress...";
+            } else if (status.scannedAt) {
+                document.getElementById('scan-subtitle').textContent = `Last scan: ${new Date(status.scannedAt).toLocaleTimeString()}`;
+                state.scanPolling = false;
+                loadSnapshots();
+            } else {
+                document.getElementById('scan-subtitle').textContent = "Ready";
+            }
+
+            const tbody = document.getElementById('scan-tbody');
+            let displayVolumes = status.volumes || [];
+
+            // FALLBACK: If scanner memory is empty (fresh boot), show configured volumes as "Ready"
+            if (displayVolumes.length === 0 && state.config && state.config.volumes && state.config.volumes.length > 0) {
+                displayVolumes = state.config.volumes.map(v => ({
+                    alias: v.alias,
+                    diskName: v.disk,
+                    status: "Ready",
+                    currentPath: "-",
+                    filesScanned: 0,
+                    foldersScanned: 0,
+                    bytesScanned: 0,
+                    issues: [],
+                    error: null
+                }));
+            }
+
+            if (displayVolumes.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">Configure volumes first.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = displayVolumes.map(vol => {
+                let stateHtml = "";
+                const hasIssues = vol.issues && vol.issues.length > 0;
+                const hasError = !!vol.error;
+
+                // Determine State Visuals
+                if (hasError || vol.status === "Failed") {
+                    stateHtml = `<span class="state-pill state-failed">Failed</span>`;
+                }
+                else if (hasIssues && vol.status === "Complete") {
+                    stateHtml = `<span class="state-pill state-failed">Issues (${vol.issues.length})</span>`;
+                }
+                else if (vol.status === "Complete") {
+                    stateHtml = `<span class="state-pill state-complete">Complete</span>`;
+                }
+                else if (vol.status === "Scanning") {
+                    stateHtml = `<span class="state-text"><span class="status-dot dot-scan"></span>Scanning</span>`;
+                }
+                else if (vol.status === "Queued" && vol.diskName) {
+                    const scanningVol = displayVolumes.find(v => v.diskName === vol.diskName && v.status === "Scanning");
+                    const waitText = scanningVol ? `Waiting (${scanningVol.alias})` : "Waiting";
+                    stateHtml = `<span class="state-text"><span class="status-dot dot-wait"></span>${escapeHtml(waitText)}</span>`;
+                }
+                else if (vol.status === "Ready") {
+                    stateHtml = `<span class="state-text"><span class="status-dot dot-wait" style="background:transparent; border:1px solid var(--muted);"></span>Ready</span>`;
+                }
+                else {
+                    stateHtml = `<span class="state-text"><span class="status-dot dot-wait"></span>${escapeHtml(vol.status)}</span>`;
+                }
+
+                // Format Metrics
+                const isPending = vol.status === "Queued" || vol.status === "Ready";
+                const f = !isPending ? Number(vol.filesScanned).toLocaleString() : '-';
+                const d = !isPending ? Number(vol.foldersScanned).toLocaleString() : '-';
+                const b = !isPending ? formatBytes(vol.bytesScanned) : '-';
+
+                // Format Path
+                let rawPath = vol.currentPath || '-';
+                if (rawPath === '') rawPath = '-';
+
+                // Append Error/Issue message below the path if something went wrong
+                let issueHtml = '';
+                if (hasError) {
+                    issueHtml = `<div style="color:var(--orange); font-size:11px; margin-top:4px; font-family:sans-serif; white-space:normal;">${escapeHtml(vol.error)}</div>`;
+                } else if (hasIssues && vol.status === "Complete") {
+                    issueHtml = `<div style="color:var(--orange); font-size:11px; margin-top:4px; font-family:sans-serif; white-space:normal;">${escapeHtml(vol.issues[0].message)}</div>`;
+                }
+
+                // The inner div handles the native CSS truncation (overflow: hidden, text-overflow: ellipsis)
+                return `
+                    <tr>
+                        <td><strong>${escapeHtml(vol.alias)}</strong></td>
+                        <td>${stateHtml}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums;">${f}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums;">${d}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums;">${b}</td>
+                        <td style="min-width:0; width:100%;">
+                            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:monospace; font-size:11px; color:var(--muted);" title="${escapeHtml(rawPath)}">
+                                ${escapeHtml(rawPath)}
+                            </div>
+                            ${issueHtml}
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        async function startScan() {
+            const notice = document.getElementById('scan-notice');
+            notice.textContent = "";
+            notice.className = "notice"; // Clear errors
+
+            const snapName = document.getElementById('scan-name').value.trim();
+            try {
+                const res = await fetch('/api/scan', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ snapshotName: snapName }) });
+                const data = await res.json().catch(()=>({}));
+                if(!res.ok && res.status !== 202) throw new Error(data.error || "Failed to start scan");
+                await fetchScanStatus();
+            } catch(err) {
+                notice.textContent = err.message;
+                notice.className = "notice error";
+            }
+        }
+
+        async function cancelScan() {
+            const notice = document.getElementById('scan-notice');
+            try {
+                await fetch('/api/scan/cancel', { method: 'POST' });
+                await fetchScanStatus();
+            } catch(err) {
+                notice.textContent = "Failed to cancel scan.";
+                notice.className = "notice error";
+            }
+        }
+
+        // ================= PREVIEW =================
+        async function loadSnapshots() {
+            const select = document.getElementById('plan-snapshot-select');
+            try {
+                const res = await fetch('/api/snapshots');
+                const snaps = await res.json();
+                if(snaps.length) {
+                    select.innerHTML = snaps.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} (${new Date(s.lastModifiedUtc).toLocaleString()})</option>`).join('');
+                } else {
+                    select.innerHTML = '<option value="">No snapshots found</option>';
+                }
+            } catch (err) {
+                select.innerHTML = '<option value="">Error loading snapshots</option>';
+            }
+        }
+
+        async function generatePlan() {
+            const snapName = document.getElementById('plan-snapshot-select').value;
+            const btn = document.getElementById('btn-plan-generate');
+            const notice = document.getElementById('plan-notice');
+
+            if(!snapName) return;
+            btn.disabled = true;
+            notice.textContent = "Simulating placement rules...";
+            notice.className = "notice";
+
+            try {
+                const res = await fetch('/api/plan', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ snapshotName: snapName }) });
+                const plan = await res.json();
+                if(!res.ok) throw new Error(plan.error || "Failed to generate plan");
+
+                notice.textContent = "";
+                renderPlan(plan);
+            } catch (err) {
+                notice.textContent = err.message;
+                notice.className = "notice error";
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        function renderPlan(plan) {
+            activePlan = plan;
+            const container = document.getElementById('plan-results');
+            const totalMoved = (plan.placements || []).reduce((sum, p) => sum + (p.sizeMoved || 0), 0);
+
+            // Generate colors for each volume based on its Alias
+            const volumes = plan.volumes || [];
+            activeVolumeColors = new Map(volumes.map((v, index) => [v.alias, `hsl(${Math.round((index * 137.508 + 145) % 360)} 58% 42%)`]));
+
+            let html = `
+                <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px;">
+                    <span style="font-size:15px;"><strong>${formatBytes(totalMoved)}</strong> to transfer</span>
+                    <div style="display:flex; align-items:center; gap:16px;">
+                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                            <input type="checkbox" id="cb-stayed-intact" ${showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
+                        </label>
+                        <span style="font-size:12px; color:var(--muted);">Snapshot: ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
+                    </div>
+                </div>
+            `;
+
+            if(plan.warnings?.length) {
+                html += plan.warnings.map(w => `<div style="background:#f4edda; color:#775829; padding:8px 12px; border-radius:4px; font-size:12px; margin-bottom:12px;">${escapeHtml(w.message)}</div>`).join('');
+            }
+
+            html += `
+                <!-- VOLUMES TABLE -->
+                <h3 style="margin: 0 0 8px; font-size: 14px;">Volume Utilization</h3>
+                <div style="margin-bottom: 32px; overflow-x:auto;">
+                    <table class="scan-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 8%;">Volume</th>
+                                <th style="width: 8%; text-align:right;">Final Size</th>
+                                <th style="width: 8%; text-align:right;">Capacity</th>
+                                <th style="width: 8%; text-align:right;">% Util</th>
+                                <th style="padding-left: 20px;">Content Source</th>
+                            </tr>
+                        </thead>
+                        <tbody id="volume-tbody"></tbody>
+                    </table>
+                </div>
+
+                <!-- PLACEMENTS TABLE -->
+                <h3 style="margin: 0 0 8px; font-size: 14px;">Path Placements</h3>
+                <div style="margin-bottom: 24px; overflow-x:auto;">
+                    <table class="plan-table" id="placement-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="path" style="">Path</th>
+                                <th class="sortable" data-sort="logic" style="width: 12%;">Logic applied</th>
+                                <th class="sortable" data-sort="target" style="width: 15%;">Target volume</th>
+                                <th class="sortable" data-sort="size" style="width: 8%; text-align:right;">Total Size</th>
+                                <th class="sortable" data-sort="moved" style="width: 15%; text-align:right;">Size Moved</th>
+                            </tr>
+                        </thead>
+                        <tbody id="placement-tbody"></tbody>
+                    </table>
+                </div>
+            `;
+            container.innerHTML = html;
+
+            document.getElementById('cb-stayed-intact').addEventListener('change', (e) => {
+                showStayedIntact = e.target.checked;
+                renderPlacementTable();
+            });
+
+            document.querySelectorAll('#placement-table th.sortable').forEach(th => {
+                th.addEventListener('click', () => {
+                    const sortKey = th.dataset.sort;
+                    if (placementSortCol === sortKey) {
+                        placementSortDesc = !placementSortDesc;
+                    } else {
+                        placementSortCol = sortKey;
+                        placementSortDesc = false;
+                    }
+                    renderPlacementTable();
+                });
+            });
+
+            renderVolumeList();
+            renderPlacementTable();
+        }
+
+        function renderVolumeList() {
+            const tbody = document.getElementById('volume-tbody');
+            if(!activePlan || !activePlan.volumes) return;
+
+            const vols = [...activePlan.volumes].sort((a,b) => a.alias.localeCompare(b.alias, undefined, {numeric:true}));
+
+            tbody.innerHTML = vols.map(volume => {
+                const color = activeVolumeColors.get(volume.alias) || '#89958f';
+                const provenance = volume.provenance || [];
+
+                const pct = volume.capacity > 0 ? (volume.finalSize / volume.capacity) * 100 : 0;
+                const isOver = pct > 100;
+
+                const segments = provenance.map(item => {
+                    const sourceColor = activeVolumeColors.get(item.alias) || '#89958f';
+                    const percentage = volume.finalSize > 0 ? (item.size * 100 / volume.finalSize) : 0;
+
+                    const tooltip = item.alias === volume.alias
+                        ? `${formatBytes(item.size)} stays on ${escapeHtml(volume.alias)}`
+                        : `${formatBytes(item.size)} from ${escapeHtml(item.alias)} will be moved here`;
+
+                    return `<span class="provenance-segment" style="width:${percentage}%;background:${sourceColor}" title="${tooltip}"></span>`;
+                }).join('');
+
+                let stateWarning = volume.isEligible ? '' : `<div style="color:var(--orange); font-size:10px; margin-top:2px;">${escapeHtml(volume.status)}</div>`;
+
+                return `
+                    <tr>
+                        <td>
+                            <div style="display:flex; align-items:center; gap:10px;">
+                                <span style="width:14px; height:14px; border-radius:50%; background:${color}; flex-shrink:0; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.1);"></span>
+                                <div>
+                                    <strong style="font-size:13px;">${escapeHtml(volume.alias)}</strong>
+                                    ${stateWarning}
+                                </div>
+                            </div>
+                        </td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums; font-weight:600;">${formatBytes(volume.finalSize)}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums; color:var(--muted);">${formatBytes(volume.capacity)}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums; font-weight:600; color:${isOver ? 'var(--orange)' : 'var(--ink)'};">${pct.toFixed(1)}%</td>
+                        <td style="padding-left:20px;">
+                            <div class="provenance-bar" style="margin: 0; height: 16px;">${segments}</div>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function renderPlacementTable() {
+            const tbody = document.getElementById('placement-tbody');
+            if(!activePlan) return;
+
+            let filtered = activePlan.placements || [];
+            if(!showStayedIntact) {
+                filtered = filtered.filter(p => p.logicApplied !== 'Stayed intact');
+            }
+
+            filtered.sort((a,b) => {
+                let valA, valB;
+                switch(placementSortCol) {
+                    case 'path': valA = a.relativePath.toLowerCase(); valB = b.relativePath.toLowerCase(); break;
+                    case 'logic': valA = a.logicApplied.toLowerCase(); valB = b.logicApplied.toLowerCase(); break;
+                    case 'target': valA = a.targets.length > 0 ? a.targets[0].alias : ''; valB = b.targets.length > 0 ? b.targets[0].alias : ''; break;
+                    case 'size': valA = a.sizeOnDisk; valB = b.sizeOnDisk; break;
+                    case 'moved': valA = a.sizeMoved; valB = b.sizeMoved; break;
+                }
+
+                let cmp = valA < valB ? -1 : (valA > valB ? 1 : 0);
+                if (cmp === 0) {
+                    const pathA = a.relativePath.toLowerCase();
+                    const pathB = b.relativePath.toLowerCase();
+                    return pathA < pathB ? -1 : (pathA > pathB ? 1 : 0);
+                }
+                return placementSortDesc ? -cmp : cmp;
+            });
+
+            document.querySelectorAll('#placement-table th.sortable').forEach(th => {
+                th.innerHTML = th.innerHTML.replace(/ ▾| ▴/g, '');
+                if (th.dataset.sort === placementSortCol) {
+                    th.innerHTML += placementSortDesc ? ' ▾' : ' ▴';
+                }
+            });
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="5" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check 'Show Stayed intact' to see unchanged paths.</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(item => {
+                const isMoved = item.sizeMoved > 0;
+                let targetUi = '';
+
+                if (item.targets.length === 0) {
+                     targetUi = '<span class="plan-muted">-</span>';
+                } else if (item.logicApplied === 'Split' || item.targets.length > 1) {
+                     const targetAlias = escapeHtml(item.targets[0].alias);
+                     const targetColor = activeVolumeColors.get(item.targets[0].alias) || '#89958f';
+                     const segments = item.targets.map(t => {
+                         const pct = (t.size / item.sizeOnDisk) * 100;
+                         const tooltip = `${formatBytes(t.size)} going to ${escapeHtml(t.alias)}`;
+                         return `<span class="provenance-segment" style="width:${pct}%; background:${activeVolumeColors.get(t.alias) || '#89958f'}" title="${tooltip}"></span>`;
+                     }).join('');
+                     targetUi = `<div style="display:flex; flex-direction:column; gap:4px;">
+                                   <span class="target-col"><i class="transfer-swatch" style="--source-color:${targetColor}"></i>${targetAlias}</span>
+                                   <div class="provenance-bar" style="height:6px; margin:0; width:100px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments}</div>
+                                 </div>`;
+                } else {
+                     const t = item.targets[0];
+                     const c = activeVolumeColors.get(t.alias) || '#89958f';
+                     targetUi = `<span class="target-col"><i class="transfer-swatch" style="--source-color:${c}"></i>${escapeHtml(t.alias)}</span>`;
+                }
+
+                let miniBar = '<span class="plan-muted">-</span>';
+                if (isMoved) {
+                     const pct = ((item.sizeMoved / item.sizeOnDisk) * 100).toFixed(1);
+                     const movedText = `${formatBytes(item.sizeMoved)} <span class="plan-muted">(${pct}%)</span>`;
+                     const segments = item.sources.map(src => {
+                         const pctSrc = (src.size / item.sizeMoved) * 100;
+                         const tooltip = `${formatBytes(src.size)} moving from ${escapeHtml(src.alias)}`;
+                         return `<span class="provenance-segment" style="width:${pctSrc}%; background:${activeVolumeColors.get(src.alias) || '#89958f'}" title="${tooltip}"></span>`;
+                     }).join('');
+                     miniBar = `<div style="display:flex; flex-direction:column; gap:4px;">
+                                   <span style="font-variant-numeric:tabular-nums;">${movedText}</span>
+                                   <div class="provenance-bar" style="height:6px; margin:0; width:100px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments}</div>
+                                </div>`;
+                }
+
+                return `
+                    <tr>
+                        <td style="font-family:monospace; font-size:11px; overflow-wrap:anywhere;">${escapeHtml(item.relativePath)}</td>
+                        <td><span class="reason-badge">${escapeHtml(item.logicApplied)}</span></td>
+                        <td>${targetUi}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums">${formatBytes(item.sizeOnDisk)}</td>
+                        <td style="text-align:right;">${miniBar}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        window.addEventListener('DOMContentLoaded', async () => {
+            await loadConfig();
+            await fetchScanStatus();
+            await loadSnapshots();
         });
-        document.getElementById('add-disk').addEventListener('click', () => {
-            if (diskList.querySelector('.empty')) diskList.innerHTML = '';
-            diskList.insertAdjacentHTML('beforeend', diskTemplate({ id:makeId(), hardwareName:'', volumes:[] }, diskList.querySelectorAll('[data-disk]').length));
-            syncRootFolderFields();
-            renderRules(collectRules());
-        });
-        document.getElementById('add-rule').addEventListener('click', () => {
-            const rules = collectRules();
-            rules.push({ id:makeId(), fullRelativePath:'', startingDepth:1, deferPlacement:false, allowedVolumeIds:[] });
-            renderRules(rules);
-        });
-        ruleList.addEventListener('click', event => {
-            const button = event.target.closest('[data-rule-action]');
-            if (!button) return;
-            const rule = button.closest('[data-rule]');
-            if (button.dataset.ruleAction === 'remove') rule.remove();
-            if (button.dataset.ruleAction === 'up' && rule.previousElementSibling) ruleList.insertBefore(rule, rule.previousElementSibling);
-            if (button.dataset.ruleAction === 'down' && rule.nextElementSibling) ruleList.insertBefore(rule.nextElementSibling, rule);
-            if (!ruleList.querySelector('[data-rule]')) ruleList.innerHTML = '<div class="empty">No placement rules configured.</div>';
-            [...ruleList.querySelectorAll('.rule-title')].forEach((title, index) => title.textContent = `Rule ${index + 1}`);
-        });
-        ruleList.addEventListener('change', event => {
-            if (event.target.matches('[data-rule-field="deferPlacement"]')) syncRuleFields();
-        });
-        document.getElementById('save').addEventListener('click', save);
-        document.getElementById('drive-pool-mode').addEventListener('change', syncRootFolderFields);
-        load();
     </script>
 </body>
 </html>
