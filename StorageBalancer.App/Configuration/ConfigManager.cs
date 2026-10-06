@@ -28,6 +28,7 @@ public class FilePlacementRuleConfig
     public string Id { get; set; } = string.Empty;
     public string FullRelativePath { get; set; } = string.Empty;
     public int StartingDepth { get; set; } = 1;
+    public bool DeferPlacement { get; set; }
     public List<string> AllowedVolumeIds { get; set; } = new();
 
     [JsonPropertyName("AllowedDiskIds")]
@@ -41,7 +42,6 @@ public class AppConfig
     public string? SnapshotsFolder { get; set; }
     public List<PhysicalDiskConfig> Disks { get; set; } = new();
     public List<FilePlacementRuleConfig> FilePlacementRules { get; set; } = new();
-    public List<string> ExcludedPathPatterns { get; set; } = new();
 }
 
 public class ConfigManager
@@ -60,7 +60,7 @@ public class ConfigManager
     public AppConfig Load()
     {
         if (!File.Exists(_configPath))
-            return new AppConfig(); // Return default empty config
+            return new AppConfig();
 
         var json = File.ReadAllText(_configPath);
         var config = JsonSerializer.Deserialize<AppConfig>(json, _options) ?? new AppConfig();

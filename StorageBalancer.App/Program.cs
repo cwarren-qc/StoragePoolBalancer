@@ -1,7 +1,6 @@
 ﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using StorageBalancer.App.Subsystems.Storage;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Subsystems.Scanner;
@@ -9,28 +8,22 @@ using StorageBalancer.App.Subsystems.Planning;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Register our services as Singletons (they live for the lifetime of the app)
 builder.Services.AddSingleton<ConfigManager>();
 builder.Services.AddSingleton<JsonStateRepository>();
 builder.Services.AddSingleton<StateScanner>();
 builder.Services.AddSingleton<PlacementPlanner>();
 
-// Add support for serving a Web UI (HTML/JS)
 builder.Services.AddEndpointsApiExplorer();
 
 var app = builder.Build();
 app.UseDefaultFiles();
-app.UseStaticFiles(); // Allows serving index.html from wwwroot folder
+app.UseStaticFiles();
 
-// --- API ENDPOINTS FOR THE WEB UI ---
-
-// GET: /api/config -> Returns the current configuration
 app.MapGet("/api/config", (ConfigManager configManager) =>
 {
     return configManager.Load();
 });
 
-// POST: /api/config -> Saves configuration from the UI
 app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
 {
     if (string.IsNullOrWhiteSpace(newConfig.SnapshotsFolder))
@@ -55,28 +48,11 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
         string.IsNullOrWhiteSpace(rule.Id) ||
         rule.FullRelativePath is null ||
         rule.StartingDepth < 1 ||
-        rule.AllowedVolumeIds is null ||
-        rule.AllowedVolumeIds.Count == 0 ||
+        (!rule.DeferPlacement && (rule.AllowedVolumeIds is null || rule.AllowedVolumeIds.Count == 0)) ||
         rule.FullRelativePath.Replace('/', '\\').StartsWith('\\') ||
         rule.FullRelativePath.Split('\\', '/').Any(part => part == "..")))
     {
-        return Results.BadRequest(new { Error = "Each placement rule needs an ID, a relative path, a starting depth of at least 1, and one or more allowed volumes." });
-    }
-
-    if (newConfig.ExcludedPathPatterns is null || newConfig.ExcludedPathPatterns.Count > 100 ||
-        newConfig.ExcludedPathPatterns.Any(pattern => string.IsNullOrWhiteSpace(pattern) || pattern.Length > 512))
-    {
-        return Results.BadRequest(new { Error = "Never-move patterns must be non-empty and no longer than 512 characters; at most 100 are allowed." });
-    }
-
-    try
-    {
-        foreach (var pattern in newConfig.ExcludedPathPatterns)
-            _ = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(250));
-    }
-    catch (ArgumentException exception)
-    {
-        return Results.BadRequest(new { Error = $"Invalid never-move pattern: {exception.Message}" });
+        return Results.BadRequest(new { Error = "Each placement rule needs an ID, a relative path, a starting depth of at least 1, and one or more allowed volumes (unless Deferred)." });
     }
 
     var diskIds = newConfig.Disks.Select(disk => disk.Id).ToArray();
@@ -87,6 +63,7 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
         .ToArray();
     var ruleIds = newConfig.FilePlacementRules.Select(rule => rule.Id);
     var configuredVolumeIds = new HashSet<string>(volumeIds, StringComparer.OrdinalIgnoreCase);
+
     if (diskIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != newConfig.Disks.Count ||
         volumeIds.Distinct(StringComparer.OrdinalIgnoreCase).Count() != volumeIds.Length ||
         volumeAliases.Distinct(StringComparer.OrdinalIgnoreCase).Count() != volumeAliases.Length ||
@@ -100,7 +77,6 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
     return Results.Ok();
 });
 
-// POST: /api/scan -> Starts a multithreaded scan; progress is available from /api/scan/status
 app.MapPost("/api/scan", (ScanStartRequest? request, ConfigManager configManager, StateScanner scanner, IWebHostEnvironment environment) =>
 {
     var config = configManager.Load();
@@ -206,7 +182,7 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
         if (snapshot is null)
             return Results.NotFound(new { Error = "The selected snapshot was not found." });
 
-        return Results.Ok(planner.CreatePlan(snapshot, config.FilePlacementRules, config.ExcludedPathPatterns));
+        return Results.Ok(planner.CreatePlan(snapshot, config.FilePlacementRules));
     }
     catch (InvalidDataException exception)
     {
@@ -231,7 +207,6 @@ static string ResolveSnapshotsFolder(AppConfig config, IWebHostEnvironment envir
     return Path.GetFullPath(snapshotsFolder);
 }
 
-// Default to port 5000 while allowing standard ASP.NET Core URL overrides.
 app.Run(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:5000");
 
 public record ScanStartRequest(string? SnapshotName);

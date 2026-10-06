@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Domain;
 
@@ -11,20 +10,15 @@ namespace StorageBalancer.App.Subsystems.Planning;
 
 public sealed class PlacementPlanner
 {
-    public PlacementPlan CreatePlan(
-        PoolSnapshot snapshot,
-        IReadOnlyList<FilePlacementRuleConfig> rules,
-        IReadOnlyList<string>? excludedPathPatterns = null)
+    public PlacementPlan CreatePlan(PoolSnapshot snapshot, IReadOnlyList<FilePlacementRuleConfig> rules)
     {
         rules ??= Array.Empty<FilePlacementRuleConfig>();
-        var exclusionPatterns = CompileExclusionPatterns(excludedPathPatterns);
         if (snapshot.SchemaVersion != 1)
             throw new InvalidDataException($"Snapshot schema version {snapshot.SchemaVersion} is not supported.");
         if (snapshot.AllocationUnitSize <= 0)
             throw new InvalidDataException("Snapshot allocation unit size must be greater than zero.");
 
         var warnings = ImmutableArray.CreateBuilder<PlanningWarning>();
-        var unplacedItems = new Dictionary<string, UnplacedItem>(StringComparer.OrdinalIgnoreCase);
         var targets = new List<PlanningTarget>();
         var virtualRoot = new MutablePlanningFolder(string.Empty, string.Empty);
 
@@ -56,18 +50,12 @@ public sealed class PlacementPlanner
                 try
                 {
                     var volumeRoot = BuildVolumeTree(disk, volume);
-                    var volumeUsed = AddSaturated(volume.OtherItemsSizeOnDisk, CalculateVolumeFolderSize(volumeRoot, snapshot.AllocationUnitSize));
                     ValidateMergeCompatibility(virtualRoot, volumeRoot);
                     MergeVolumeTree(virtualRoot, volumeRoot, disk, volume, alias);
+
                     targets.Add(new PlanningTarget(
-                        disk.Id,
-                        disk.HardwareName,
-                        volume.Id,
-                        alias,
-                        volume.MountPoint,
-                        volume.RootFolderPath,
-                        volume.Capacity,
-                        Math.Max(0, volume.Capacity - Math.Min(volume.Capacity, volumeUsed))));
+                        disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath,
+                        volume.Capacity, Math.Max(0, volume.Capacity - volume.OtherItemsSizeOnDisk), volume.OtherItemsSizeOnDisk));
                 }
                 catch (InvalidDataException exception)
                 {
@@ -80,570 +68,397 @@ public sealed class PlacementPlanner
             warnings.Add(new PlanningWarning("No complete, usable volumes were found in the snapshot."));
 
         var root = Freeze(virtualRoot, snapshot.AllocationUnitSize, warnings);
-        var excludedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var foldersWithExcludedDescendants = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var excludedItemCount = CollectExcludedPaths(root, exclusionPatterns, excludedPaths, foldersWithExcludedDescendants);
-        if (excludedItemCount > 0)
-            warnings.Add(new PlanningWarning($"{excludedItemCount:N0} files and folders matched never-move patterns and were left in place."));
+        var ctx = new PlanContext(targets);
+        var otherRecord = new MatchRecord("Other (Deferred duplicates & unmatched)", "None", 999999);
 
-        var chunkAssignments = new Dictionary<string, ChunkAssignment>(StringComparer.OrdinalIgnoreCase);
-        var splitFolders = new List<SplitFolder>();
+        PopulateUnassigned(root, ctx);
 
         foreach (var rule in rules)
         {
-            if (rule is null || rule.StartingDepth < 1 || rule.AllowedVolumeIds is null || rule.AllowedVolumeIds.Count == 0)
-            {
-                warnings.Add(new PlanningWarning("Skipped an invalid placement rule."));
-                continue;
-            }
+            if (rule is null || rule.StartingDepth < 1) continue;
+            if (!rule.DeferPlacement && (rule.AllowedVolumeIds is null || rule.AllowedVolumeIds.Count == 0)) continue;
 
-            ApplyRuleChunked(
-                root,
-                rule,
-                targets,
-                chunkAssignments,
-                splitFolders,
-                excludedPaths,
-                foldersWithExcludedDescendants,
-                unplacedItems);
+            ApplyRuleRecursive(root, rule, NormalizeRulePath(rule.FullRelativePath), null, ctx, otherRecord);
         }
 
-        if (rules.Count == 0)
-            warnings.Add(new PlanningWarning("No placement rules are configured."));
+        // Any files that completely bypassed the rules are treated as deferred.
+        foreach (var kvp in ctx.Unassigned)
+        {
+            bool first = true;
+            foreach (var copy in kvp.Value)
+            {
+                // We use otherRecord for all of them so they group neatly
+                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", otherRecord));
+                first = false;
+            }
+        }
+        ctx.Unassigned.Clear();
+        ctx.MatchRecords.Add(otherRecord);
 
-        // AGGREGATE PLACEMENTS
-        var folderPlacements = chunkAssignments.Values
-            .Where(a => a.ItemType == "Folder")
-            .Select(a => CreatePlacement(a.PlacementPath, a))
-            .ToList();
+        ProcessDeferredStayPut(ctx);
+        ProcessDeferredEmptiest(ctx);
 
-        var filePlacements = chunkAssignments.Values
-            .Where(a => a.ItemType == "File")
-            .GroupBy(a => new {
-                Directory = GetDirectoryPath(a.PlacementPath),
-                a.Target.VolumeId,
-                a.Reason,
-                a.RuleId
+        var volumeSummaries = BuildVolumeSummaries(snapshot, ctx);
+
+        var finalPlacements = ctx.MatchRecords
+            .Where(m => m.TotalSize > 0)
+            .Select(m => {
+                string logic = "Stayed intact";
+                if (m.MovedSize > 0)
+                {
+                    if (m.Targets.Count > 1) logic = "Split";
+                    else if (m.Sources.Count == 1 && m.Targets.Count == 1) logic = "Moved";
+                    else if (m.Sources.Count > 1 && m.Targets.Count == 1)
+                    {
+                        var target = m.Targets.Keys.First();
+                        var biggestSource = m.Sources.OrderByDescending(kv => kv.Value).FirstOrDefault().Key;
+                        logic = string.Equals(target, biggestSource, StringComparison.OrdinalIgnoreCase) ? "Consolidated" : "Moved/Consolidated";
+                    }
+                }
+
+                var targetsArray = m.Targets.Select(kvp => new VolumeProvenance(kvp.Key, FindVolumeAlias(snapshot, kvp.Key), kvp.Value))
+                    .OrderByDescending(x => x.Size).ToImmutableArray();
+
+                var movedSourcesArray = m.MovedSources.Select(kvp => new VolumeProvenance(kvp.Key, FindVolumeAlias(snapshot, kvp.Key), kvp.Value))
+                    .OrderByDescending(x => x.Size).ToImmutableArray();
+
+                return new PlannedPlacement(
+                    m.Order,
+                    DisplayPath(m.Path),
+                    m.RuleId,
+                    logic,
+                    targetsArray,
+                    m.TotalSize,
+                    m.MovedSize,
+                    movedSourcesArray
+                );
             })
-            .Select(g => new PlannedPlacement(
-                string.IsNullOrEmpty(g.Key.Directory) ? "* (Loose files)" : $"{g.Key.Directory}\\* (Loose files)",
-                "File Group",
-                g.Key.RuleId,
-                g.First().Target.DiskId,
-                g.First().Target.DiskName,
-                g.First().Target.Alias,
-                g.Key.VolumeId,
-                g.First().Target.MountPoint,
-                g.Sum(a => a.SizeOnDisk),
-                g.Key.Reason
-            ));
-
-        var placements = folderPlacements.Concat(filePlacements)
-            .OrderBy(placement => placement.RelativePath, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(p => p.RelativePath, StringComparer.OrdinalIgnoreCase)
             .ToImmutableArray();
 
-        // AGGREGATE UNPLACED
-        var folderUnplaced = unplacedItems.Values
-            .Where(u => u.ItemType == "Folder")
-            .ToList();
-
-        var fileUnplaced = unplacedItems.Values
-            .Where(u => u.ItemType == "File")
-            .GroupBy(u => new {
-                Directory = GetDirectoryPath(u.RelativePath),
-                u.RuleId,
-                u.Reason
-            })
-            .Select(g => new UnplacedItem(
-                string.IsNullOrEmpty(g.Key.Directory) ? "* (Loose files)" : $"{g.Key.Directory}\\* (Loose files)",
-                "File Group",
-                g.Key.RuleId,
-                g.Key.Reason,
-                g.Sum(u => u.SizeOnDisk)
-            ));
-
-        var finalUnplacedItems = folderUnplaced.Concat(fileUnplaced)
-            .OrderBy(item => item.RelativePath, StringComparer.OrdinalIgnoreCase)
-            .ToImmutableArray();
-
-        var moves = ImmutableArray.CreateBuilder<PlannedMove>();
-        BuildMoves(root, null, chunkAssignments, moves);
-        var plannedMoves = moves.OrderBy(move => move.RelativePath, StringComparer.OrdinalIgnoreCase).ToImmutableArray();
-
-        var volumeSummaries = BuildVolumeSummaries(
-            snapshot,
-            targets,
-            root,
-            chunkAssignments,
-            plannedMoves);
-
-        return new PlacementPlan(
-            snapshot.ScannedAt,
-            placements,
-            plannedMoves,
-            finalUnplacedItems,
-            splitFolders.OrderBy(f => f.RelativePath, StringComparer.OrdinalIgnoreCase).ToImmutableArray(),
-            warnings.ToImmutable(),
-            volumeSummaries);
+        return new PlacementPlan(snapshot.ScannedAt, finalPlacements, warnings.ToImmutable(), volumeSummaries);
     }
 
-    private static void ApplyRuleChunked(
-        PlanningFolder folder,
-        FilePlacementRuleConfig rule,
-        List<PlanningTarget> targets,
-        Dictionary<string, ChunkAssignment> chunkAssignments,
-        List<SplitFolder> splitFolders,
-        HashSet<string> excludedPaths,
-        HashSet<string> foldersWithExcludedDescendants,
-        Dictionary<string, UnplacedItem> unplacedItems)
+    private static void PopulateUnassigned(PlanningFolder folder, PlanContext ctx)
     {
-        if (excludedPaths.Contains(folder.RelativePath))
-            return;
+        foreach (var child in folder.Children)
+        {
+            if (child is PlanningFile file) ctx.Unassigned[file] = file.Copies.ToList();
+            else if (child is PlanningFolder childFolder) PopulateUnassigned(childFolder, ctx);
+        }
+    }
 
-        if (IsCovered(folder.RelativePath, chunkAssignments))
-            return;
+    private static void ApplyRuleRecursive(PlanningFolder folder, FilePlacementRuleConfig rule, string rulePath, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord otherRecord)
+    {
+        var unassignedFiles = GetUnassignedFilesInSubtree(folder, ctx).ToList();
+        if (unassignedFiles.Count == 0) return;
 
-        var rulePath = NormalizeRulePath(rule.FullRelativePath);
-        var withinRule = IsSameOrDescendant(folder.RelativePath, rulePath);
-        var canReachRule = IsSameOrDescendant(rulePath, folder.RelativePath);
-        if (!withinRule && !canReachRule)
-            return;
+        bool withinRule = IsSameOrDescendant(folder.RelativePath, rulePath);
+        bool canReachRule = IsSameOrDescendant(rulePath, folder.RelativePath);
 
-        var depth = GetRuleDepth(folder.RelativePath);
+        if (!withinRule && !canReachRule) return;
+
+        int depth = GetRuleDepth(folder.RelativePath);
 
         if (withinRule && depth >= rule.StartingDepth)
         {
-            var failReason = string.Empty;
-            if (!foldersWithExcludedDescendants.Contains(folder.RelativePath) &&
-                TryPlaceChunk(folder, rule, targets, chunkAssignments, "Folder", out failReason))
+            MatchRecord? currentRecord = inheritedRecord;
+
+            if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
             {
-                RemoveUnplacedSubtree(folder.RelativePath, unplacedItems);
+                currentRecord = new MatchRecord(folder.RelativePath, rule.Id, ctx.DecisionCounter++);
+                ctx.MatchRecords.Add(currentRecord);
+            }
+
+            if (rule.DeferPlacement)
+            {
+                if (currentRecord == null && string.IsNullOrEmpty(folder.RelativePath))
+                {
+                    var loose = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
+                    if (loose.Count > 0)
+                    {
+                        currentRecord = new MatchRecord("<Pool Root> (Loose files)", rule.Id, ctx.DecisionCounter++);
+                        ctx.MatchRecords.Add(currentRecord);
+                    }
+                }
+
+                if (currentRecord != null)
+                {
+                    foreach (var file in unassignedFiles) DeferFile(file, currentRecord, otherRecord, ctx);
+                }
                 return;
             }
 
-            if (!string.IsNullOrEmpty(folder.RelativePath))
+            var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeIds.Contains(t.VolumeId, StringComparer.OrdinalIgnoreCase)).ToList();
+
+            if (string.IsNullOrEmpty(folder.RelativePath))
             {
-                var reason = foldersWithExcludedDescendants.Contains(folder.RelativePath)
-                    ? "Contains never-move items (must process children individually)"
-                    : (failReason ?? "Too large for remaining space");
-                splitFolders.Add(new SplitFolder(folder.RelativePath, reason));
+                ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, otherRecord);
+                return;
             }
 
-            ProcessSplit(folder, rule, targets, chunkAssignments, splitFolders, excludedPaths, foldersWithExcludedDescendants, unplacedItems);
+            long logicalSize = unassignedFiles.Sum(f => f.SizeOnDisk);
+            var currentAffinity = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in unassignedFiles)
+            {
+                foreach (var copy in ctx.Unassigned[file])
+                    currentAffinity[copy.VolumeId] = currentAffinity.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
+            }
+
+            var bestTarget = allowedTargets
+                .Where(t => t.RemainingSpace >= logicalSize)
+                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.VolumeId))
+                .ThenByDescending(t => t.RemainingSpace)
+                .FirstOrDefault();
+
+            if (bestTarget != null)
+            {
+                foreach (var file in unassignedFiles) AssignPrimaryCopy(file, bestTarget, currentRecord, otherRecord, ctx);
+                return;
+            }
+
+            ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, otherRecord);
             return;
         }
 
         if (canReachRule || withinRule)
         {
-            var childrenFolders = folder.Children
-                .OfType<PlanningFolder>()
-                .OrderByDescending(child => child.SizeOnDisk)
-                .ThenBy(child => child.RelativePath, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var childFolder in childrenFolders)
-            {
-                ApplyRuleChunked(childFolder, rule, targets, chunkAssignments, splitFolders, excludedPaths, foldersWithExcludedDescendants, unplacedItems);
-            }
+            foreach (var child in folder.Children.OfType<PlanningFolder>())
+                ApplyRuleRecursive(child, rule, rulePath, inheritedRecord, ctx, otherRecord);
         }
     }
 
-    private static void ProcessSplit(
-        PlanningFolder folder,
-        FilePlacementRuleConfig rule,
-        List<PlanningTarget> targets,
-        Dictionary<string, ChunkAssignment> chunkAssignments,
-        List<SplitFolder> splitFolders,
-        HashSet<string> excludedPaths,
-        HashSet<string> foldersWithExcludedDescendants,
-        Dictionary<string, UnplacedItem> unplacedItems)
+    private static void ProcessSplit(PlanningFolder folder, FilePlacementRuleConfig rule, List<PlanningTarget> allowedTargets, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord otherRecord)
     {
-        var directFiles = folder.Children
-            .OfType<PlanningFile>()
-            .Where(f => !excludedPaths.Contains(f.RelativePath) && !IsCovered(f.RelativePath, chunkAssignments))
-            .ToList();
+        var looseFiles = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
 
-        if (directFiles.Count > 0)
+        if (looseFiles.Count > 0)
         {
-            if (!TryPlaceFilesAsChunk(directFiles, folder.RelativePath, rule, targets, chunkAssignments))
+            MatchRecord looseRecord = inheritedRecord!;
+            if (looseRecord == null)
             {
-                PlanningTarget? affinityTarget = null;
-                foreach (var file in directFiles.OrderByDescending(f => f.SizeOnDisk))
+                looseRecord = new MatchRecord(string.IsNullOrEmpty(folder.RelativePath) ? "<Pool Root> (Loose files)" : folder.RelativePath + "\\* (Loose files)", rule.Id, ctx.DecisionCounter++);
+                ctx.MatchRecords.Add(looseRecord);
+            }
+
+            long looseSize = looseFiles.Sum(f => f.SizeOnDisk);
+            var currentAffinity = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in looseFiles)
+            {
+                foreach (var copy in ctx.Unassigned[file])
+                    currentAffinity[copy.VolumeId] = currentAffinity.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
+            }
+
+            var bestTarget = allowedTargets
+                .Where(t => t.RemainingSpace >= looseSize)
+                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.VolumeId))
+                .ThenByDescending(t => t.RemainingSpace)
+                .FirstOrDefault();
+
+            if (bestTarget != null)
+            {
+                foreach (var file in looseFiles) AssignPrimaryCopy(file, bestTarget, looseRecord, otherRecord, ctx);
+            }
+            else
+            {
+                foreach (var file in looseFiles)
                 {
-                    if (TryPlaceFileWithAffinity(file, rule, targets, chunkAssignments, ref affinityTarget))
-                    {
-                        unplacedItems.Remove(file.RelativePath);
-                    }
-                    else
-                    {
-                        unplacedItems[file.RelativePath] = new UnplacedItem(
-                            file.RelativePath, "File", rule.Id, "No allowed volume has enough space for this file.", file.SizeOnDisk);
-                    }
+                    var fileTarget = allowedTargets
+                        .Where(t => t.RemainingSpace >= file.SizeOnDisk)
+                        .OrderByDescending(t => ctx.Unassigned[file].Any(c => string.Equals(c.VolumeId, t.VolumeId, StringComparison.OrdinalIgnoreCase)) ? 1 : 0)
+                        .ThenByDescending(t => t.RemainingSpace)
+                        .FirstOrDefault();
+
+                    if (fileTarget != null) AssignPrimaryCopy(file, fileTarget, looseRecord, otherRecord, ctx);
+                    else DeferFile(file, looseRecord, otherRecord, ctx);
                 }
             }
         }
 
-        var childFolders = folder.Children
-            .OfType<PlanningFolder>()
-            .OrderByDescending(c => c.SizeOnDisk)
-            .ThenBy(c => c.RelativePath, StringComparer.OrdinalIgnoreCase);
-
-        foreach (var childFolder in childFolders)
-        {
-            ApplyRuleChunked(childFolder, rule, targets, chunkAssignments, splitFolders, excludedPaths, foldersWithExcludedDescendants, unplacedItems);
-        }
+        foreach (var child in folder.Children.OfType<PlanningFolder>())
+            ApplyRuleRecursive(child, rule, NormalizeRulePath(rule.FullRelativePath), inheritedRecord, ctx, otherRecord);
     }
 
-private static void ReclaimFreedSpace(
-        List<PlanningTarget> targets,
-        Dictionary<string, long> dist,
-        string chosenTargetVolumeId)
+    private static void AssignPrimaryCopy(PlanningFile file, PlanningTarget target, MatchRecord? record, MatchRecord otherRecord, PlanContext ctx)
     {
-        foreach (var kvp in dist)
+        var copies = ctx.Unassigned[file];
+        ctx.Unassigned.Remove(file);
+
+        var primaryCopy = copies.FirstOrDefault(c => string.Equals(c.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase)) ?? copies.First();
+        ctx.CopyDestinations[primaryCopy] = target.VolumeId;
+
+        if (record != null)
         {
-            if (!string.Equals(kvp.Key, chosenTargetVolumeId, StringComparison.OrdinalIgnoreCase))
+            record.TotalSize += primaryCopy.SizeOnDisk;
+            record.Targets[target.VolumeId] = record.Targets.GetValueOrDefault(target.VolumeId) + primaryCopy.SizeOnDisk;
+            record.Sources[primaryCopy.VolumeId] = record.Sources.GetValueOrDefault(primaryCopy.VolumeId) + primaryCopy.SizeOnDisk;
+
+            if (!string.Equals(primaryCopy.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase))
             {
-                var sourceTarget = targets.FirstOrDefault(t => string.Equals(t.VolumeId, kvp.Key, StringComparison.OrdinalIgnoreCase));
-                if (sourceTarget != null)
-                {
-                    sourceTarget.RemainingSpace += kvp.Value;
-                }
-            }
-        }
-    }
-
-    private static bool TryPlaceChunk(
-        PlanningNode node,
-        FilePlacementRuleConfig rule,
-        List<PlanningTarget> targets,
-        Dictionary<string, ChunkAssignment> assignments,
-        string itemType,
-        out string? failReason)
-    {
-        failReason = null;
-        var allowedVolumeOrder = GetAllowedVolumeOrder(rule);
-        var allowedTargets = targets.Where(t => allowedVolumeOrder.ContainsKey(t.VolumeId)).ToList();
-
-        if (allowedTargets.Count == 0)
-        {
-            failReason = "No allowed volumes available.";
-            return false;
-        }
-
-        var dist = GetSizeDistribution(node);
-        var masterVolumeId = dist.OrderByDescending(kvp => kvp.Value).FirstOrDefault().Key;
-
-        // Priority 1: Try Master Volume
-        if (masterVolumeId != null && allowedVolumeOrder.ContainsKey(masterVolumeId))
-        {
-            var masterTarget = allowedTargets.First(t => string.Equals(t.VolumeId, masterVolumeId, StringComparison.OrdinalIgnoreCase));
-            long existingSize = dist.GetValueOrDefault(masterVolumeId);
-            long newSizeNeeded = Math.Max(0, node.SizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= masterTarget.RemainingSpace)
-            {
-                masterTarget.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, masterTarget.VolumeId); // <--- RECLAIM SPACE
-
-                string reason = (existingSize >= node.SizeOnDisk) ? "Stayed intact" : "Joined master copy";
-                assignments.Add(node.RelativePath, new ChunkAssignment(masterTarget, rule.Id, reason, node.SizeOnDisk, node.RelativePath, itemType));
-                return true;
+                record.MovedSize += primaryCopy.SizeOnDisk;
+                record.MovedSources[primaryCopy.VolumeId] = record.MovedSources.GetValueOrDefault(primaryCopy.VolumeId) + primaryCopy.SizeOnDisk;
             }
         }
 
-        // Priority 2: Try other allowed volumes
-        var orderedTargets = allowedTargets
-            .OrderBy(t => allowedVolumeOrder[t.VolumeId])
-            .ThenByDescending(t => t.RemainingSpace)
-            .ToList();
-
-        foreach (var target in orderedTargets)
+        if (!ctx.AssignedVolumes.TryGetValue(file, out var set))
         {
-            if (string.Equals(target.VolumeId, masterVolumeId, StringComparison.OrdinalIgnoreCase)) continue;
-
-            long existingSize = dist.GetValueOrDefault(target.VolumeId);
-            long newSizeNeeded = Math.Max(0, node.SizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= target.RemainingSpace)
-            {
-                target.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, target.VolumeId); // <--- RECLAIM SPACE
-
-                assignments.Add(node.RelativePath, new ChunkAssignment(target, rule.Id, "Moved entirely", node.SizeOnDisk, node.RelativePath, itemType));
-                return true;
-            }
+            set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            ctx.AssignedVolumes[file] = set;
         }
+        set.Add(target.VolumeId);
+        target.RemainingSpace -= primaryCopy.SizeOnDisk;
 
-        var maxFree = allowedTargets.Max(t => t.RemainingSpace);
-        failReason = node.SizeOnDisk > maxFree
-            ? "Folder is larger than the free space on any single allowed volume."
-            : "Not enough space (even taking existing files into account).";
-
-        return false;
-    }
-
-    private static bool TryPlaceFilesAsChunk(
-        IReadOnlyList<PlanningFile> files,
-        string folderPath,
-        FilePlacementRuleConfig rule,
-        List<PlanningTarget> targets,
-        Dictionary<string, ChunkAssignment> assignments)
-    {
-        long totalSizeOnDisk = files.Sum(f => f.SizeOnDisk);
-
-        var allowedVolumeOrder = GetAllowedVolumeOrder(rule);
-        var allowedTargets = targets.Where(t => allowedVolumeOrder.ContainsKey(t.VolumeId)).ToList();
-        if (allowedTargets.Count == 0) return false;
-
-        var dist = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        foreach (var file in files)
+        if (!string.Equals(primaryCopy.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase))
         {
-            foreach (var copy in file.Copies)
-                dist[copy.VolumeId] = dist.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
-        }
-
-        var masterVolumeId = dist.OrderByDescending(kvp => kvp.Value).FirstOrDefault().Key;
-
-        // Try Master Volume
-        if (masterVolumeId != null && allowedVolumeOrder.ContainsKey(masterVolumeId))
-        {
-            var masterTarget = allowedTargets.First(t => string.Equals(t.VolumeId, masterVolumeId, StringComparison.OrdinalIgnoreCase));
-            long existingSize = dist.GetValueOrDefault(masterVolumeId);
-            long newSizeNeeded = Math.Max(0, totalSizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= masterTarget.RemainingSpace)
-            {
-                masterTarget.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, masterTarget.VolumeId); // <--- RECLAIM SPACE
-
-                foreach (var file in files)
-                {
-                    assignments.Add(file.RelativePath, new ChunkAssignment(masterTarget, rule.Id, "Grouped files", file.SizeOnDisk, file.RelativePath, "File Group"));
-                }
-                return true;
-            }
-        }
-
-        // Try other targets
-        var orderedTargets = allowedTargets
-            .OrderBy(t => allowedVolumeOrder[t.VolumeId])
-            .ThenByDescending(t => t.RemainingSpace)
-            .ToList();
-
-        foreach (var target in orderedTargets)
-        {
-            if (string.Equals(target.VolumeId, masterVolumeId, StringComparison.OrdinalIgnoreCase)) continue;
-
-            long existingSize = dist.GetValueOrDefault(target.VolumeId);
-            long newSizeNeeded = Math.Max(0, totalSizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= target.RemainingSpace)
-            {
-                target.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, target.VolumeId); // <--- RECLAIM SPACE
-
-                foreach (var file in files)
-                {
-                    assignments.Add(file.RelativePath, new ChunkAssignment(target, rule.Id, "Grouped files", file.SizeOnDisk, file.RelativePath, "File Group"));
-                }
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool TryPlaceFileWithAffinity(
-        PlanningFile file,
-        FilePlacementRuleConfig rule,
-        List<PlanningTarget> targets,
-        Dictionary<string, ChunkAssignment> assignments,
-        ref PlanningTarget? affinityTarget)
-    {
-        var dist = GetSizeDistribution(file);
-
-        if (affinityTarget != null)
-        {
-            long existingSize = dist.GetValueOrDefault(affinityTarget.VolumeId);
-            long newSizeNeeded = Math.Max(0, file.SizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= affinityTarget.RemainingSpace)
-            {
-                affinityTarget.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, affinityTarget.VolumeId); // <--- RECLAIM SPACE
-
-                assignments.Add(file.RelativePath, new ChunkAssignment(affinityTarget, rule.Id, "Scattered", file.SizeOnDisk, file.RelativePath, "File"));
-                return true;
-            }
-        }
-
-        var allowedVolumeOrder = GetAllowedVolumeOrder(rule);
-        var orderedTargets = targets
-            .Where(t => allowedVolumeOrder.ContainsKey(t.VolumeId))
-            .OrderBy(t => allowedVolumeOrder[t.VolumeId])
-            .ThenByDescending(t => t.RemainingSpace)
-            .ToList();
-
-        foreach (var target in orderedTargets)
-        {
-            long existingSize = dist.GetValueOrDefault(target.VolumeId);
-            long newSizeNeeded = Math.Max(0, file.SizeOnDisk - existingSize);
-
-            if (newSizeNeeded <= target.RemainingSpace)
-            {
-                target.RemainingSpace -= newSizeNeeded;
-                ReclaimFreedSpace(targets, dist, target.VolumeId); // <--- RECLAIM SPACE
-
-                assignments.Add(file.RelativePath, new ChunkAssignment(target, rule.Id, "Scattered", file.SizeOnDisk, file.RelativePath, "File"));
-                affinityTarget = target;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static string GetDirectoryPath(string relativePath)
-    {
-        var index = relativePath.LastIndexOf('\\');
-        return index < 0 ? string.Empty : relativePath[..index];
-    }
-
-    private static Dictionary<string, long> GetSizeDistribution(PlanningNode node)
-    {
-        var dist = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
-        if (node is PlanningFile file)
-        {
-            foreach (var copy in file.Copies)
-                dist[copy.VolumeId] = Math.Max(dist.GetValueOrDefault(copy.VolumeId), copy.SizeOnDisk);
-        }
-        else if (node is PlanningFolder folder)
-        {
-            AccumulateSizeDistribution(folder, dist);
-        }
-        return dist;
-    }
-
-    private static void AccumulateSizeDistribution(PlanningFolder folder, Dictionary<string, long> dist)
-    {
-        foreach (var child in folder.Children)
-        {
-            if (child is PlanningFile file)
-            {
-                foreach (var copy in file.Copies)
-                    dist[copy.VolumeId] = dist.GetValueOrDefault(copy.VolumeId) + copy.SizeOnDisk;
-            }
-            else if (child is PlanningFolder childFolder)
-            {
-                AccumulateSizeDistribution(childFolder, dist);
-            }
-        }
-    }
-
-    private static bool IsCovered(string relativePath, Dictionary<string, ChunkAssignment> assignments)
-    {
-        if (assignments.ContainsKey(relativePath)) return true;
-        var path = relativePath;
-        while (true)
-        {
-            var separatorIndex = path.LastIndexOf('\\');
-            if (separatorIndex < 0) return false;
-            path = path[..separatorIndex];
-            if (assignments.ContainsKey(path)) return true;
-        }
-    }
-
-    private static void BuildMoves(
-        PlanningFolder folder,
-        ChunkAssignment? inheritedAssignment,
-        Dictionary<string, ChunkAssignment> assignments,
-        ImmutableArray<PlannedMove>.Builder moves)
-    {
-        if (assignments.TryGetValue(folder.RelativePath, out var explicitFolderAssignment))
-            inheritedAssignment = explicitFolderAssignment;
-
-        foreach (var child in folder.Children)
-        {
-            if (child is PlanningFolder childFolder)
-            {
-                BuildMoves(childFolder, inheritedAssignment, assignments, moves);
-                continue;
-            }
-
-            if (child is not PlanningFile file)
-                continue;
-
-            var assignment = assignments.TryGetValue(file.RelativePath, out var explicitFileAssignment)
-                ? explicitFileAssignment
-                : inheritedAssignment;
-
-            if (assignment is null || file.Copies.IsEmpty || file.Copies.Any(copy =>
-                string.Equals(copy.VolumeId, assignment.Target.VolumeId, StringComparison.OrdinalIgnoreCase)))
-            {
-                continue;
-            }
-
-            var source = file.Copies
-                .OrderByDescending(copy => copy.SizeOnDisk)
-                .ThenBy(copy => copy.DiskId, StringComparer.OrdinalIgnoreCase)
-                .First();
-            var destination = Path.Combine(
-                assignment.Target.RootFolderPath,
-                file.RelativePath.Replace('\\', Path.DirectorySeparatorChar));
-            moves.Add(new PlannedMove(
+            var destPath = Path.Combine(target.RootFolderPath, file.RelativePath.Replace('\\', Path.DirectorySeparatorChar));
+            ctx.Moves.Add(new PlannedMove(
                 file.RelativePath,
-                assignment.PlacementPath,
-                source.DiskId,
-                source.DiskName,
-                source.VolumeAlias,
-                source.VolumeId,
-                source.FullPath,
-                assignment.Target.DiskId,
-                assignment.Target.DiskName,
-                assignment.Target.Alias,
-                assignment.Target.VolumeId,
-                destination,
-                file.Size));
+                primaryCopy.DiskId, primaryCopy.DiskName, primaryCopy.VolumeAlias, primaryCopy.VolumeId, primaryCopy.FullPath,
+                target.DiskId, target.DiskName, target.Alias, target.VolumeId, destPath, primaryCopy.SizeOnDisk));
+        }
+
+        foreach (var copy in copies)
+        {
+            if (copy == primaryCopy) continue;
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", otherRecord));
         }
     }
 
-    private static ImmutableArray<VolumePlanSummary> BuildVolumeSummaries(
-        PoolSnapshot snapshot,
-        List<PlanningTarget> targets,
-        PlanningFolder root,
-        Dictionary<string, ChunkAssignment> assignments,
-        ImmutableArray<PlannedMove> moves)
+    private static void DeferFile(PlanningFile file, MatchRecord record, MatchRecord otherRecord, PlanContext ctx)
     {
-        var targetsByVolume = targets.ToDictionary(target => target.VolumeId, StringComparer.OrdinalIgnoreCase);
+        var copies = ctx.Unassigned[file];
+        ctx.Unassigned.Remove(file);
+
+        bool isPrimary = true;
+        foreach (var copy in copies)
+        {
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Placement", isPrimary ? record : otherRecord));
+            isPrimary = false;
+        }
+    }
+
+    private static void ProcessDeferredStayPut(PlanContext ctx)
+    {
+        var remainingDeferred = new List<DeferredCopy>();
+        foreach (var def in ctx.Deferred)
+        {
+            var target = ctx.Targets.FirstOrDefault(t => string.Equals(t.VolumeId, def.Copy.VolumeId, StringComparison.OrdinalIgnoreCase));
+            var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
+
+            if (target != null && target.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(target.VolumeId)))
+            {
+                ctx.CopyDestinations[def.Copy] = target.VolumeId;
+                target.RemainingSpace -= def.Copy.SizeOnDisk;
+
+                if (assigned == null)
+                {
+                    assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    ctx.AssignedVolumes[def.File] = assigned;
+                }
+                assigned.Add(target.VolumeId);
+
+                if (def.Record != null)
+                {
+                    def.Record.TotalSize += def.Copy.SizeOnDisk;
+                    def.Record.Targets[target.VolumeId] = def.Record.Targets.GetValueOrDefault(target.VolumeId) + def.Copy.SizeOnDisk;
+                    def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                }
+            }
+            else
+            {
+                remainingDeferred.Add(def);
+            }
+        }
+        ctx.Deferred = remainingDeferred;
+    }
+
+    private static void ProcessDeferredEmptiest(PlanContext ctx)
+    {
+        var remainingDeferred = new List<DeferredCopy>();
+        foreach (var def in ctx.Deferred)
+        {
+            var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
+            var target = ctx.Targets
+                .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(t.VolumeId)))
+                .OrderByDescending(t => t.RemainingSpace)
+                .FirstOrDefault();
+
+            if (target != null)
+            {
+                ctx.CopyDestinations[def.Copy] = target.VolumeId;
+                target.RemainingSpace -= def.Copy.SizeOnDisk;
+
+                if (assigned == null)
+                {
+                    assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    ctx.AssignedVolumes[def.File] = assigned;
+                }
+                assigned.Add(target.VolumeId);
+
+                if (def.Record != null)
+                {
+                    def.Record.TotalSize += def.Copy.SizeOnDisk;
+                    def.Record.Targets[target.VolumeId] = def.Record.Targets.GetValueOrDefault(target.VolumeId) + def.Copy.SizeOnDisk;
+                    def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+
+                    if (!string.Equals(def.Copy.VolumeId, target.VolumeId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        def.Record.MovedSize += def.Copy.SizeOnDisk;
+                        def.Record.MovedSources[def.Copy.VolumeId] = def.Record.MovedSources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                    }
+                }
+
+                var destPath = Path.Combine(target.RootFolderPath, def.File.RelativePath.Replace('\\', Path.DirectorySeparatorChar));
+                ctx.Moves.Add(new PlannedMove(
+                    def.File.RelativePath,
+                    def.Copy.DiskId, def.Copy.DiskName, def.Copy.VolumeAlias, def.Copy.VolumeId, def.Copy.FullPath,
+                    target.DiskId, target.DiskName, target.Alias, target.VolumeId, destPath, def.Copy.SizeOnDisk));
+            }
+            else
+            {
+                remainingDeferred.Add(def);
+            }
+        }
+        ctx.Deferred = remainingDeferred;
+
+        foreach (var def in ctx.Deferred)
+        {
+            ctx.CopyDestinations[def.Copy] = def.Copy.VolumeId;
+            if (def.Record != null)
+            {
+                def.Record.TotalSize += def.Copy.SizeOnDisk;
+                def.Record.Targets[def.Copy.VolumeId] = def.Record.Targets.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+                def.Record.Sources[def.Copy.VolumeId] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeId) + def.Copy.SizeOnDisk;
+            }
+        }
+    }
+
+    private static ImmutableArray<VolumePlanSummary> BuildVolumeSummaries(PoolSnapshot snapshot, PlanContext ctx)
+    {
+        var targetsByVolume = ctx.Targets.ToDictionary(target => target.VolumeId, StringComparer.OrdinalIgnoreCase);
         var finalSizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
         var provenanceSizes = new Dictionary<(string Target, string Source), long>();
-        CollectExistingCopies(root, finalSizes, provenanceSizes);
 
-        foreach (var move in moves)
+        foreach (var target in ctx.Targets)
         {
-            finalSizes[move.SourceVolumeId] = Math.Max(0, finalSizes.GetValueOrDefault(move.SourceVolumeId) - move.Size);
-            var sourceKey = (move.SourceVolumeId, move.SourceVolumeId);
-            provenanceSizes[sourceKey] = Math.Max(0, provenanceSizes.GetValueOrDefault(sourceKey) - move.Size);
-            finalSizes[move.TargetVolumeId] = AddSaturated(finalSizes.GetValueOrDefault(move.TargetVolumeId), move.Size);
-            var targetKey = (move.TargetVolumeId, move.SourceVolumeId);
-            provenanceSizes[targetKey] = AddSaturated(provenanceSizes.GetValueOrDefault(targetKey), move.Size);
+            finalSizes[target.VolumeId] = target.OtherItemsSizeOnDisk;
+            provenanceSizes[(target.VolumeId, target.VolumeId)] = target.OtherItemsSizeOnDisk;
         }
 
-        var transfers = moves
-            .GroupBy(move => new
-            {
-                move.SourceVolumeId,
-                move.TargetVolumeId,
-                GroupPath = GetTransferGroupPath(move.PlacementPath, move.RelativePath)
-            })
+        foreach (var kvp in ctx.CopyDestinations)
+        {
+            var targetVolumeId = kvp.Value;
+            finalSizes[targetVolumeId] = AddSaturated(finalSizes.GetValueOrDefault(targetVolumeId), kvp.Key.SizeOnDisk);
+
+            var provKey = (targetVolumeId, kvp.Key.VolumeId);
+            provenanceSizes[provKey] = AddSaturated(provenanceSizes.GetValueOrDefault(provKey), kvp.Key.SizeOnDisk);
+        }
+
+        var transfers = ctx.Moves
+            .GroupBy(move => new { move.SourceVolumeId, move.TargetVolumeId, GroupPath = GetTransferGroupPath(move.RelativePath) })
             .Select(group => new AggregatedTransfer(
-                group.Key.SourceVolumeId,
-                group.Key.TargetVolumeId,
-                group.Key.GroupPath,
-                group.First().SourceAlias,
-                group.First().TargetAlias,
-                group.Count(),
-                CountMovedFolders(group, group.Key.GroupPath),
-                group.Aggregate(0L, (total, move) => AddSaturated(total, move.Size))))
+                group.Key.SourceVolumeId, group.Key.TargetVolumeId, group.Key.GroupPath, group.First().SourceAlias, group.First().TargetAlias,
+                group.Count(), CountMovedFolders(group, group.Key.GroupPath), group.Aggregate(0L, (total, move) => AddSaturated(total, move.Size))))
             .ToArray();
 
         var summaries = ImmutableArray.CreateBuilder<VolumePlanSummary>();
@@ -655,119 +470,42 @@ private static void ReclaimFreedSpace(
                 var volume = disk.Volumes[volumeIndex];
                 var alias = string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias;
                 var isEligible = targetsByVolume.ContainsKey(volume.Id);
+
                 var provenance = provenanceSizes
                     .Where(pair => string.Equals(pair.Key.Target, volume.Id, StringComparison.OrdinalIgnoreCase) && pair.Value > 0)
-                    .Select(pair => new VolumeProvenance(
-                        pair.Key.Source,
-                        FindVolumeAlias(snapshot, pair.Key.Source),
-                        pair.Value))
-                    .OrderByDescending(item => item.Size)
-                    .ToImmutableArray();
+                    .Select(pair => new VolumeProvenance(pair.Key.Source, FindVolumeAlias(snapshot, pair.Key.Source), pair.Value))
+                    .OrderByDescending(item => item.Size).ToImmutableArray();
+
                 var incoming = transfers
-                    .Where(transfer => string.Equals(transfer.TargetVolumeId, volume.Id, StringComparison.OrdinalIgnoreCase))
-                    .Select(transfer => new VolumeTransferGroup(
-                        DisplayPath(transfer.RelativePath),
-                        transfer.SourceVolumeId,
-                        transfer.SourceAlias,
-                        transfer.FolderCount,
-                        transfer.FileCount,
-                        transfer.Size))
-                    .OrderByDescending(item => item.Size)
-                    .ToImmutableArray();
+                    .Where(t => string.Equals(t.TargetVolumeId, volume.Id, StringComparison.OrdinalIgnoreCase))
+                    .Select(t => new VolumeTransferGroup(DisplayPath(t.RelativePath), t.SourceVolumeId, t.SourceAlias, t.FolderCount, t.FileCount, t.Size))
+                    .OrderByDescending(item => item.Size).ToImmutableArray();
+
                 var outgoing = transfers
-                    .Where(transfer => string.Equals(transfer.SourceVolumeId, volume.Id, StringComparison.OrdinalIgnoreCase))
-                    .Select(transfer => new VolumeTransferGroup(
-                        DisplayPath(transfer.RelativePath),
-                        transfer.TargetVolumeId,
-                        transfer.TargetAlias,
-                        transfer.FolderCount,
-                        transfer.FileCount,
-                        transfer.Size))
-                    .OrderByDescending(item => item.Size)
-                    .ToImmutableArray();
+                    .Where(t => string.Equals(t.SourceVolumeId, volume.Id, StringComparison.OrdinalIgnoreCase))
+                    .Select(t => new VolumeTransferGroup(DisplayPath(t.RelativePath), t.TargetVolumeId, t.TargetAlias, t.FolderCount, t.FileCount, t.Size))
+                    .OrderByDescending(item => item.Size).ToImmutableArray();
 
                 summaries.Add(new VolumePlanSummary(
-                    volume.Id,
-                    alias,
-                    disk.HardwareName,
-                    volume.MountPoint,
-                    volume.Capacity,
-                    finalSizes.GetValueOrDefault(volume.Id),
-                    isEligible,
-                    isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan",
-                    provenance,
-                    incoming,
-                    outgoing));
+                    volume.Id, alias, disk.HardwareName, volume.MountPoint, volume.Capacity, finalSizes.GetValueOrDefault(volume.Id),
+                    isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance, incoming, outgoing));
             }
         }
-
         return summaries.ToImmutable();
     }
 
-    private static PlannedPlacement CreatePlacement(string relativePath, ChunkAssignment assignment)
-    {
-        return new PlannedPlacement(
-            DisplayPath(relativePath),
-            assignment.ItemType,
-            assignment.RuleId,
-            assignment.Target.DiskId,
-            assignment.Target.DiskName,
-            assignment.Target.Alias,
-            assignment.Target.VolumeId,
-            assignment.Target.MountPoint,
-            assignment.SizeOnDisk,
-            assignment.Reason);
-    }
-
-    private static void RemoveUnplacedSubtree(string relativePath, Dictionary<string, UnplacedItem> unplacedItems)
-    {
-        var prefix = string.IsNullOrEmpty(relativePath) ? string.Empty : relativePath + "\\";
-        foreach (var path in unplacedItems.Keys.Where(path =>
-            string.Equals(path, relativePath, StringComparison.OrdinalIgnoreCase) ||
-            (prefix.Length == 0 ? !string.IsNullOrEmpty(path) : path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))).ToArray())
-        {
-            unplacedItems.Remove(path);
-        }
-    }
-
-    private static Dictionary<string, int> GetAllowedVolumeOrder(FilePlacementRuleConfig rule)
-    {
-        return rule.AllowedVolumeIds
-            .Select((volumeId, index) => new { VolumeId = volumeId, Index = index })
-            .GroupBy(item => item.VolumeId, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.First().Index, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static void CollectExistingCopies(
-        PlanningFolder folder,
-        Dictionary<string, long> finalSizes,
-        Dictionary<(string Target, string Source), long> provenanceSizes)
+    private static IEnumerable<PlanningFile> GetUnassignedFilesInSubtree(PlanningFolder folder, PlanContext ctx)
     {
         foreach (var child in folder.Children)
         {
-            if (child is PlanningFolder childFolder)
-            {
-                CollectExistingCopies(childFolder, finalSizes, provenanceSizes);
-                continue;
-            }
-
-            if (child is not PlanningFile file)
-                continue;
-
-            foreach (var copy in file.Copies)
-            {
-                finalSizes[copy.VolumeId] = AddSaturated(finalSizes.GetValueOrDefault(copy.VolumeId), copy.Size);
-                var provenanceKey = (copy.VolumeId, copy.VolumeId);
-                provenanceSizes[provenanceKey] = AddSaturated(provenanceSizes.GetValueOrDefault(provenanceKey), copy.Size);
-            }
+            if (child is PlanningFile file && ctx.Unassigned.ContainsKey(file)) yield return file;
+            else if (child is PlanningFolder childFolder)
+                foreach (var f in GetUnassignedFilesInSubtree(childFolder, ctx)) yield return f;
         }
     }
 
-    private static string GetTransferGroupPath(string placementPath, string filePath)
+    private static string GetTransferGroupPath(string filePath)
     {
-        if (!string.Equals(placementPath, filePath, StringComparison.OrdinalIgnoreCase))
-            return placementPath;
-
         var separatorIndex = filePath.LastIndexOf('\\');
         return separatorIndex < 0 ? string.Empty : filePath[..separatorIndex];
     }
@@ -781,10 +519,8 @@ private static void ReclaimFreedSpace(
             var folderPath = separatorIndex < 0 ? string.Empty : move.RelativePath[..separatorIndex];
             while (!string.IsNullOrEmpty(folderPath))
             {
-                if (IsSameOrDescendant(folderPath, groupPath))
-                    folders.Add(folderPath);
-                if (string.Equals(folderPath, groupPath, StringComparison.OrdinalIgnoreCase))
-                    break;
+                if (IsSameOrDescendant(folderPath, groupPath)) folders.Add(folderPath);
+                if (string.Equals(folderPath, groupPath, StringComparison.OrdinalIgnoreCase)) break;
                 separatorIndex = folderPath.LastIndexOf('\\');
                 folderPath = separatorIndex < 0 ? string.Empty : folderPath[..separatorIndex];
             }
@@ -800,132 +536,11 @@ private static void ReclaimFreedSpace(
             for (var volumeIndex = 0; volumeIndex < disk.Volumes.Count; volumeIndex++)
             {
                 var volume = disk.Volumes[volumeIndex];
-                if (!string.Equals(volume.Id, volumeId, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
+                if (!string.Equals(volume.Id, volumeId, StringComparison.OrdinalIgnoreCase)) continue;
                 return string.IsNullOrWhiteSpace(volume.Alias) ? $"D{diskIndex + 1}-V{volumeIndex + 1}" : volume.Alias;
             }
         }
         return volumeId;
-    }
-
-    private sealed record AggregatedTransfer(
-        string SourceVolumeId,
-        string TargetVolumeId,
-        string RelativePath,
-        string SourceAlias,
-        string TargetAlias,
-        int FileCount,
-        int FolderCount,
-        long Size);
-
-    private static ImmutableArray<Regex> CompileExclusionPatterns(IReadOnlyList<string>? patterns)
-    {
-        if (patterns is null)
-            return ImmutableArray<Regex>.Empty;
-
-        try
-        {
-            return patterns
-                .Where(pattern => !string.IsNullOrWhiteSpace(pattern))
-                .Select(pattern => new Regex(
-                    pattern.Trim(),
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-                    TimeSpan.FromMilliseconds(250)))
-                .ToImmutableArray();
-        }
-        catch (ArgumentException exception)
-        {
-            throw new InvalidDataException($"A never-move path pattern is invalid: {exception.Message}", exception);
-        }
-    }
-
-    private static int CollectExcludedPaths(
-        PlanningFolder folder,
-        ImmutableArray<Regex> patterns,
-        HashSet<string> excludedPaths,
-        HashSet<string> foldersWithExcludedDescendants)
-    {
-        if (MatchesExclusion(folder.RelativePath, true, patterns))
-        {
-            MarkFolderAndAncestors(folder.RelativePath, foldersWithExcludedDescendants);
-            return AddExcludedSubtree(folder, excludedPaths);
-        }
-
-        var excludedCount = 0;
-        foreach (var child in folder.Children)
-        {
-            if (child is PlanningFile file)
-            {
-                if (!MatchesExclusion(file.RelativePath, false, patterns))
-                    continue;
-
-                excludedPaths.Add(file.RelativePath);
-                MarkFolderAndAncestors(folder.RelativePath, foldersWithExcludedDescendants);
-                excludedCount++;
-            }
-            else if (child is PlanningFolder childFolder)
-            {
-                var childExcludedCount = CollectExcludedPaths(childFolder, patterns, excludedPaths, foldersWithExcludedDescendants);
-                if (childExcludedCount > 0)
-                {
-                    foldersWithExcludedDescendants.Add(folder.RelativePath);
-                    excludedCount += childExcludedCount;
-                }
-            }
-        }
-
-        return excludedCount;
-    }
-
-    private static int AddExcludedSubtree(PlanningFolder folder, HashSet<string> excludedPaths)
-    {
-        excludedPaths.Add(folder.RelativePath);
-        var count = 1;
-        foreach (var child in folder.Children)
-        {
-            if (child is PlanningFile file)
-            {
-                excludedPaths.Add(file.RelativePath);
-                count++;
-            }
-            else if (child is PlanningFolder childFolder)
-            {
-                count += AddExcludedSubtree(childFolder, excludedPaths);
-            }
-        }
-
-        return count;
-    }
-
-    private static bool MatchesExclusion(string relativePath, bool isFolder, ImmutableArray<Regex> patterns)
-    {
-        foreach (var pattern in patterns)
-        {
-            try
-            {
-                if (pattern.IsMatch(relativePath) || (isFolder && pattern.IsMatch(relativePath + "\\")))
-                    return true;
-            }
-            catch (RegexMatchTimeoutException exception)
-            {
-                throw new InvalidDataException("A never-move path pattern exceeded the matching time limit.", exception);
-            }
-        }
-
-        return false;
-    }
-
-    private static void MarkFolderAndAncestors(string relativePath, HashSet<string> foldersWithExcludedDescendants)
-    {
-        foldersWithExcludedDescendants.Add(relativePath);
-        var separatorIndex = relativePath.LastIndexOf('\\');
-        while (separatorIndex >= 0)
-        {
-            relativePath = relativePath[..separatorIndex];
-            foldersWithExcludedDescendants.Add(relativePath);
-            separatorIndex = relativePath.LastIndexOf('\\');
-        }
     }
 
     private static MutableVolumeFolder BuildVolumeTree(SnapshotDisk disk, SnapshotVolume volume)
@@ -935,8 +550,7 @@ private static void ReclaimFreedSpace(
         {
             var relativePath = NormalizeSnapshotPath(entry.Key);
             var folder = GetOrAddVolumeFolder(root, relativePath);
-            if (entry.Value is null)
-                throw new InvalidDataException($"Folder entry '{entry.Key}' has no file list.");
+            if (entry.Value is null) throw new InvalidDataException($"Folder entry '{entry.Key}' has no file list.");
 
             foreach (var file in entry.Value)
             {
@@ -945,27 +559,21 @@ private static void ReclaimFreedSpace(
                 {
                     throw new InvalidDataException($"Folder entry '{entry.Key}' contains an invalid file record.");
                 }
-
                 folder.Files.Add(new MutableVolumeFile(file.Name, file.Size, file.SizeOnDisk));
             }
         }
-
         return root;
     }
 
     private static string NormalizeSnapshotPath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || path == ".")
-            return string.Empty;
-
+        if (string.IsNullOrWhiteSpace(path) || path == ".") return string.Empty;
         var normalized = path.Replace('/', '\\');
         if (normalized.StartsWith('\\') || Path.IsPathRooted(path))
             throw new InvalidDataException($"Folder path '{path}' is rooted instead of relative.");
-
         var parts = normalized.Split('\\', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Any(part => part is "." or ".."))
             throw new InvalidDataException($"Folder path '{path}' contains a traversal segment.");
-
         return string.Join('\\', parts);
     }
 
@@ -981,39 +589,15 @@ private static void ReclaimFreedSpace(
                 child = new MutableVolumeFolder(segment, path);
                 current.ChildFolders.Add(segment, child);
             }
-
             current = child;
         }
-
         return current;
     }
 
-    private static long CalculateVolumeFolderSize(MutableVolumeFolder folder, int allocationUnitSize)
-    {
-        var size = (long)allocationUnitSize;
-        foreach (var file in folder.Files)
-            size = AddSaturated(size, file.SizeOnDisk);
-        foreach (var child in folder.ChildFolders.Values)
-            size = AddSaturated(size, CalculateVolumeFolderSize(child, allocationUnitSize));
-        folder.SizeOnDisk = size;
-        return size;
-    }
-
     private static void MergeVolumeTree(
-        MutablePlanningFolder target,
-        MutableVolumeFolder source,
-        SnapshotDisk disk,
-        SnapshotVolume volume,
-        string alias)
+        MutablePlanningFolder target, MutableVolumeFolder source, SnapshotDisk disk, SnapshotVolume volume, string alias)
     {
-        target.Copies.Add(new PlanningFolderCopy(
-            disk.Id,
-            disk.HardwareName,
-            volume.Id,
-            alias,
-            volume.MountPoint,
-            volume.RootFolderPath!,
-            source.SizeOnDisk));
+        target.Copies.Add(new PlanningFolderCopy(disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath!, source.SizeOnDisk));
 
         foreach (var file in source.Files)
         {
@@ -1028,16 +612,7 @@ private static void ReclaimFreedSpace(
             }
 
             var fileRelativePath = JoinRelativePath(source.RelativePath, file.Name);
-            mergedFile.Copies.Add(new PlanningFileCopy(
-                disk.Id,
-                disk.HardwareName,
-                volume.Id,
-                alias,
-                volume.MountPoint,
-                volume.RootFolderPath!,
-                fileRelativePath,
-                file.Size,
-                file.SizeOnDisk));
+            mergedFile.Copies.Add(new PlanningFileCopy(disk.Id, disk.HardwareName, volume.Id, alias, volume.MountPoint, volume.RootFolderPath!, fileRelativePath, file.Size, file.SizeOnDisk));
         }
 
         foreach (var child in source.ChildFolders.Values)
@@ -1058,10 +633,8 @@ private static void ReclaimFreedSpace(
     private static void ValidateMergeCompatibility(MutablePlanningFolder target, MutableVolumeFolder source)
     {
         foreach (var file in source.Files)
-        {
             if (target.ChildFolders.ContainsKey(file.Name))
                 throw new InvalidDataException($"'{file.Name}' is both a file and a folder in the merged snapshot.");
-        }
 
         foreach (var child in source.ChildFolders.Values)
         {
@@ -1073,10 +646,7 @@ private static void ReclaimFreedSpace(
         }
     }
 
-    private static PlanningFolder Freeze(
-        MutablePlanningFolder folder,
-        int allocationUnitSize,
-        ImmutableArray<PlanningWarning>.Builder warnings)
+    private static PlanningFolder Freeze(MutablePlanningFolder folder, int allocationUnitSize, ImmutableArray<PlanningWarning>.Builder warnings)
     {
         var files = folder.Files.Values
             .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
@@ -1084,18 +654,10 @@ private static void ReclaimFreedSpace(
             .Select(file =>
             {
                 var copies = file.Copies.ToImmutableArray();
-                const string duplicateCopiesWarning = "Multiple copies of a file were found; extra copies are left untouched by the preview.";
-                if (copies.Length > 1 && !warnings.Any(warning => warning.Message == duplicateCopiesWarning))
-                    warnings.Add(new PlanningWarning(duplicateCopiesWarning));
                 if (copies.Select(copy => copy.Size).Distinct().Skip(1).Any())
                     warnings.Add(new PlanningWarning($"Copies of '{file.RelativePath}' have different sizes; planning uses the largest copy."));
 
-                return new PlanningFile(
-                    file.Name,
-                    file.RelativePath,
-                    copies.Max(copy => copy.Size),
-                    copies.Max(copy => copy.SizeOnDisk),
-                    copies);
+                return new PlanningFile(file.Name, file.RelativePath, copies.Max(copy => copy.Size), copies.Max(copy => copy.SizeOnDisk), copies);
             })
             .ToImmutableArray();
 
@@ -1113,24 +675,15 @@ private static void ReclaimFreedSpace(
 
         var size = files.Aggregate(0L, (total, file) => AddSaturated(total, file.Size));
         var sizeOnDisk = (long)allocationUnitSize;
-        foreach (var file in files)
-            sizeOnDisk = AddSaturated(sizeOnDisk, file.SizeOnDisk);
-        foreach (var child in childFolders)
-            sizeOnDisk = AddSaturated(sizeOnDisk, child.SizeOnDisk);
+        foreach (var file in files) sizeOnDisk = AddSaturated(sizeOnDisk, file.SizeOnDisk);
+        foreach (var child in childFolders) sizeOnDisk = AddSaturated(sizeOnDisk, child.SizeOnDisk);
 
-        return new PlanningFolder(
-            folder.Name,
-            folder.RelativePath,
-            size,
-            sizeOnDisk,
-            folder.Copies.ToImmutableArray(),
-            children);
+        return new PlanningFolder(folder.Name, folder.RelativePath, size, sizeOnDisk, folder.Copies.ToImmutableArray(), children);
     }
 
     private static bool IsSameOrDescendant(string path, string parent)
     {
-        if (string.IsNullOrEmpty(parent))
-            return true;
+        if (string.IsNullOrEmpty(parent)) return true;
         return string.Equals(path, parent, StringComparison.OrdinalIgnoreCase) ||
             path.StartsWith(parent + "\\", StringComparison.OrdinalIgnoreCase);
     }
@@ -1152,13 +705,12 @@ private static void ReclaimFreedSpace(
 
     private static string DisplayPath(string path)
     {
-        return string.IsNullOrEmpty(path) ? "." : path;
+        return string.IsNullOrEmpty(path) ? "<Pool Root>" : path;
     }
 
     private static long AddSaturated(long left, long right)
     {
-        if (right <= 0)
-            return left;
+        if (right <= 0) return left;
         return left > long.MaxValue - right ? long.MaxValue : left + right;
     }
 
@@ -1189,15 +741,33 @@ private static void ReclaimFreedSpace(
         public List<PlanningFileCopy> Copies { get; } = new();
     }
 
+    private sealed class PlanContext(List<PlanningTarget> targets)
+    {
+        public int DecisionCounter { get; set; } = 1;
+        public List<PlanningTarget> Targets { get; } = targets;
+        public Dictionary<PlanningFile, List<PlanningFileCopy>> Unassigned { get; } = new();
+        public List<DeferredCopy> Deferred { get; set; } = new();
+        public Dictionary<PlanningFile, HashSet<string>> AssignedVolumes { get; } = new();
+        public Dictionary<PlanningFileCopy, string> CopyDestinations { get; } = new();
+        public List<PlannedMove> Moves { get; } = new();
+        public List<MatchRecord> MatchRecords { get; } = new();
+    }
+
+    private sealed class MatchRecord(string path, string ruleId, int order)
+    {
+        public string Path { get; } = path;
+        public string RuleId { get; } = ruleId;
+        public int Order { get; } = order;
+        public bool IsDeferred { get; set; }
+        public long TotalSize { get; set; }
+        public long MovedSize { get; set; }
+        public Dictionary<string, long> Targets { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, long> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, long> MovedSources { get; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
     private sealed class PlanningTarget(
-        string diskId,
-        string diskName,
-        string volumeId,
-        string alias,
-        string mountPoint,
-        string rootFolderPath,
-        long capacity,
-        long remainingSpace)
+        string diskId, string diskName, string volumeId, string alias, string mountPoint, string rootFolderPath, long capacity, long remainingSpace, long otherItemsSizeOnDisk)
     {
         public string DiskId { get; } = diskId;
         public string DiskName { get; } = diskName;
@@ -1207,13 +777,10 @@ private static void ReclaimFreedSpace(
         public string RootFolderPath { get; } = rootFolderPath;
         public long Capacity { get; } = capacity;
         public long RemainingSpace { get; set; } = remainingSpace;
+        public long OtherItemsSizeOnDisk { get; } = otherItemsSizeOnDisk;
     }
 
-    private sealed record ChunkAssignment(
-        PlanningTarget Target,
-        string RuleId,
-        string Reason,
-        long SizeOnDisk,
-        string PlacementPath,
-        string ItemType);
+    private sealed record DeferredCopy(PlanningFile File, PlanningFileCopy Copy, string Reason, MatchRecord Record);
+    private sealed record PlannedMove(string RelativePath, string SourceDiskId, string SourceDiskName, string SourceAlias, string SourceVolumeId, string SourcePath, string TargetDiskId, string TargetDiskName, string TargetAlias, string TargetVolumeId, string DestinationPath, long Size);
+    private sealed record AggregatedTransfer(string SourceVolumeId, string TargetVolumeId, string RelativePath, string SourceAlias, string TargetAlias, int FileCount, int FolderCount, long Size);
 }

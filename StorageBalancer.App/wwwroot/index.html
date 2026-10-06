@@ -53,17 +53,20 @@
         .plan-counts { display:flex; flex-wrap:wrap; gap:22px; padding:13px 0; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
         .plan-counts strong { color:var(--ink); font-size:15px; }
         .plan-warning { margin:9px 0; padding:9px 11px; color:#775829; background:#f4edda; border-radius:5px; font-size:12px; overflow-wrap:anywhere; }
-        .plan-error { margin:9px 0; color:#a43f2a; font-size:12px; }
         .plan-group { border-bottom:1px solid var(--line); }
         .plan-group summary { padding:13px 0; cursor:pointer; font-size:13px; font-weight:700; }
         .table-scroll { overflow:auto; margin:0 0 14px; }
         .plan-table { width:100%; border-collapse:collapse; font-size:12px; }
-        .plan-table th,.plan-table td { padding:8px 9px; border-top:1px solid var(--line); text-align:left; vertical-align:top; }
-        .plan-table th { color:var(--muted); font-size:10px; font-weight:750; text-transform:uppercase; }
+        .plan-table th,.plan-table td { padding:8px 12px; border-top:1px solid var(--line); text-align:left; vertical-align:top; }
+        .plan-table th { color:var(--muted); font-size:10px; font-weight:750; text-transform:uppercase; white-space:nowrap; user-select:none; }
+        .plan-table th:hover { color:var(--ink); }
         .plan-table td { overflow-wrap:anywhere; }
+        .plan-table th:first-child, .plan-table td:first-child { white-space:nowrap; width:45px; text-align:center; }
         .plan-path { min-width:180px; font-family:Consolas,monospace; }
         .plan-muted { color:var(--muted); }
         .reason-badge { display:inline-block; padding:3px 6px; background:#e9eee3; color:var(--deep); border-radius:4px; font-size:10px; font-weight:700; white-space:nowrap; }
+        .target-col { display:flex; align-items:center; gap:6px; white-space:nowrap; }
+        .transfer-swatch { width:9px; height:9px; flex:none; background:var(--source-color); border-radius:2px; display:inline-block; }
         .volume-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,270px),1fr)); gap:10px; margin-top:15px; }
         .volume-card { min-width:0; padding:0; overflow:hidden; color:var(--ink); text-align:left; background:var(--surface); border:1px solid var(--line); border-top:5px solid var(--volume-color); border-radius:7px; cursor:pointer; }
         .volume-card[aria-pressed="true"] { outline:2px solid var(--volume-color); outline-offset:1px; }
@@ -75,7 +78,6 @@
         .provenance-segment { min-width:1px; height:100%; }
         .provenance-legend { display:flex; flex-wrap:wrap; gap:5px 11px; padding:0 13px 11px; }
         .provenance-key { display:inline-flex; align-items:center; gap:5px; color:var(--muted); font-size:10px; }
-        .provenance-swatch,.transfer-swatch { width:9px; height:9px; flex:none; background:var(--source-color); border-radius:2px; }
         .volume-state { padding:0 13px 11px; color:var(--orange); font-size:11px; }
         .volume-detail { margin-top:24px; padding-top:16px; border-top:1px solid var(--line); }
         .volume-detail-head { display:flex; align-items:baseline; gap:9px; margin-bottom:12px; }
@@ -140,9 +142,13 @@
             const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
             return `${(bytes / (1024 ** index)).toFixed(index > 1 ? 1 : 0)} ${units[index]}`;
         };
+
         let activePlan = null;
         let activeVolumeColors = new Map();
         let selectedVolumeId = null;
+
+        let placementSortCol = 'path';
+        let placementSortDesc = false;
 
         async function loadOverview() {
             const notice = document.getElementById('notice');
@@ -187,6 +193,99 @@
             }
         }
 
+        function sortPlacements(placements) {
+            return [...placements].sort((a, b) => {
+                let valA, valB;
+                switch(placementSortCol) {
+                    case 'order': valA = a.order; valB = b.order; break;
+                    case 'path': valA = a.relativePath.toLowerCase(); valB = b.relativePath.toLowerCase(); break;
+                    case 'logic': valA = a.logicApplied.toLowerCase(); valB = b.logicApplied.toLowerCase(); break;
+                    case 'target': valA = a.targets.length > 0 ? a.targets[0].alias : ''; valB = b.targets.length > 0 ? b.targets[0].alias : ''; break;
+                    case 'size': valA = a.sizeOnDisk; valB = b.sizeOnDisk; break;
+                    case 'moved': valA = a.sizeMoved; valB = b.sizeMoved; break;
+                }
+
+                let cmp = 0;
+                if (valA < valB) cmp = -1;
+                else if (valA > valB) cmp = 1;
+
+                if (cmp === 0) {
+                    const pathA = a.relativePath.toLowerCase();
+                    const pathB = b.relativePath.toLowerCase();
+                    if (pathA < pathB) return -1;
+                    if (pathA > pathB) return 1;
+                    return 0;
+                }
+                return placementSortDesc ? -cmp : cmp;
+            });
+        }
+
+        function renderPlacementTable() {
+            const tbody = document.getElementById('placement-tbody');
+            if (!tbody || !activePlan) return;
+
+            const sorted = sortPlacements(activePlan.placements || []);
+            if (sorted.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="plan-muted">No rules applied.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = sorted.map(item => {
+                const isMoved = item.sizeMoved > 0;
+                let targetUi = '';
+
+                if (item.targets.length === 0) {
+                     targetUi = '<span class="plan-muted">-</span>';
+                } else if (item.logicApplied === 'Split' || item.targets.length > 1) {
+                     const targetAlias = escapeHtml(item.targets[0].alias);
+                     const targetColor = activeVolumeColors.get(item.targets[0].volumeId) || '#89958f';
+                     const segments = item.targets.map(t => {
+                         const pct = (t.size / item.sizeOnDisk) * 100;
+                         return `<span class="provenance-segment" style="width:${pct}%; background:${activeVolumeColors.get(t.volumeId) || '#89958f'}" title="${escapeHtml(t.alias)}"></span>`;
+                     }).join('');
+                     targetUi = `<div style="display:flex; flex-direction:column; gap:4px;">
+                                   <span class="target-col"><i class="transfer-swatch" style="--source-color:${targetColor}"></i>${targetAlias}</span>
+                                   <div class="provenance-bar" style="height:6px; margin:0; width:100px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments}</div>
+                                 </div>`;
+                } else {
+                     const t = item.targets[0];
+                     const c = activeVolumeColors.get(t.volumeId) || '#89958f';
+                     targetUi = `<span class="target-col"><i class="transfer-swatch" style="--source-color:${c}"></i>${escapeHtml(t.alias)}</span>`;
+                }
+
+                let miniBar = '<span class="plan-muted">-</span>';
+                if (isMoved) {
+                     const pct = ((item.sizeMoved / item.sizeOnDisk) * 100).toFixed(1);
+                     const movedText = `${formatBytes(item.sizeMoved)} <span class="plan-muted">(${pct}%)</span>`;
+                     const segments = item.sources.map(src => {
+                         const pctSrc = (src.size / item.sizeMoved) * 100;
+                         return `<span class="provenance-segment" style="width:${pctSrc}%; background:${activeVolumeColors.get(src.volumeId) || '#89958f'}" title="${escapeHtml(src.alias)}"></span>`;
+                     }).join('');
+                     miniBar = `<div style="display:flex; flex-direction:column; gap:4px;">
+                                   <span>${movedText}</span>
+                                   <div class="provenance-bar" style="height:6px; margin:0; width:100px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments}</div>
+                                </div>`;
+                }
+
+                return `<tr>
+                    <td>${item.order === 999999 ? '-' : item.order}</td>
+                    <td class="plan-path">${escapeHtml(item.relativePath)}</td>
+                    <td><span class="reason-badge">${escapeHtml(item.logicApplied)}</span></td>
+                    <td>${targetUi}</td>
+                    <td style="font-variant-numeric:tabular-nums">${formatBytes(item.sizeOnDisk)}</td>
+                    <td style="font-variant-numeric:tabular-nums">${miniBar}</td>
+                </tr>`;
+            }).join('');
+
+            document.querySelectorAll('th[data-sort]').forEach(th => {
+                const sortKey = th.dataset.sort;
+                th.innerHTML = th.innerHTML.replace(/ ▾| ▴/g, '');
+                if (placementSortCol === sortKey) {
+                    th.innerHTML += placementSortDesc ? ' ▾' : ' ▴';
+                }
+            });
+        }
+
         function renderPlan(plan) {
             activePlan = plan;
             const volumes = plan.volumes || [];
@@ -194,17 +293,13 @@
             if (!volumes.some(volume => volume.volumeId === selectedVolumeId))
                 selectedVolumeId = volumes[0]?.volumeId || null;
 
+            const totalMovedBytes = volumes.reduce((acc, vol) =>
+                acc + (vol.incoming || []).reduce((sum, inc) => sum + inc.size, 0)
+            , 0);
+
             const warningMarkup = (plan.warnings || []).map(warning => `<div class="plan-warning">${escapeHtml(warning.message)}</div>`).join('');
 
-            const placementMarkup = (plan.placements || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td>${escapeHtml(item.itemType)}</td><td><span class="reason-badge">${escapeHtml(item.reason)}</span></td><td>${escapeHtml(item.targetAlias)}</td><td>${formatBytes(item.sizeOnDisk)}</td></tr>`).join('');
-            const splitMarkup = (plan.splitFolders || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td class="plan-muted">${escapeHtml(item.reason)}</td></tr>`).join('');
-            const unplacedMarkup = (plan.unplacedItems || []).map(item => `<tr><td class="plan-path">${escapeHtml(item.relativePath)}</td><td>${escapeHtml(item.itemType)}</td><td>${escapeHtml(item.reason)}</td><td>${formatBytes(item.sizeOnDisk)}</td></tr>`).join('');
-            const moveMarkup = (plan.moves || []).map(move => `<tr><td class="plan-path">${escapeHtml(move.relativePath)}</td><td>${escapeHtml(move.sourceAlias)}</td><td>${escapeHtml(move.targetAlias)}</td><td>${formatBytes(move.size)}</td></tr>`).join('');
-
-            const emptyTable = '<tr><td colspan="5" class="plan-muted">No entries.</td></tr>';
-            const emptySplits = '<tr><td colspan="2" class="plan-muted">All folders stayed intact.</td></tr>';
-
-            const volumeCards = volumes.map(volume => {
+            const volumeCards = [...volumes].sort((a, b) => a.alias.localeCompare(b.alias, undefined, {numeric: true})).map(volume => {
                 const color = activeVolumeColors.get(volume.volumeId);
                 const provenance = volume.provenance || [];
                 const segments = provenance.map(item => {
@@ -226,15 +321,48 @@
             }).join('');
 
             document.getElementById('plan-results').innerHTML = `
-                <div class="plan-counts"><span><strong>${plan.placements.length}</strong> placements</span><span><strong>${plan.moves.length}</strong> proposed moves</span><span><strong>${plan.unplacedItems.length}</strong> unplaced</span><span>Snapshot ${new Date(plan.snapshotScannedAt).toLocaleString()}</span></div>
+                <div class="plan-counts">
+                    <span><strong>${plan.placements.length}</strong> items routed</span>
+                    <span><strong>${formatBytes(totalMovedBytes)}</strong> to transfer</span>
+                    <span>Snapshot ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
+                </div>
                 ${warningMarkup}
                 <div class="volume-grid" id="volume-grid">${volumeCards || '<div class="empty">No usable volumes in this snapshot.</div>'}</div>
                 <div id="volume-detail" class="volume-detail"></div>
-                <details class="plan-group plan-secondary"><summary>Placements (${plan.placements.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Path</th><th>Type</th><th>Logic applied</th><th>Target volume</th><th>Size on disk</th></tr></thead><tbody>${placementMarkup || emptyTable}</tbody></table></div></details>
-                <details class="plan-group"><summary>Split Folders (${plan.splitFolders.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Folder Path</th><th>Reason</th></tr></thead><tbody>${splitMarkup || emptySplits}</tbody></table></div></details>
-                <details class="plan-group"><summary>Unplaced items (${plan.unplacedItems.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>Path</th><th>Type</th><th>Reason</th><th>Size on disk</th></tr></thead><tbody>${unplacedMarkup || '<tr><td colspan="4" class="plan-muted">No unplaced items.</td></tr>'}</tbody></table></div></details>
-                <details class="plan-group"><summary>File-level move preview (${plan.moves.length})</summary><div class="table-scroll"><table class="plan-table"><thead><tr><th>File</th><th>From volume</th><th>To volume</th><th>Logical size</th></tr></thead><tbody>${moveMarkup || '<tr><td colspan="4" class="plan-muted">No moves required.</td></tr>'}</tbody></table></div></details>`;
+                <details class="plan-group plan-secondary" open>
+                    <summary>Placements (${plan.placements.length})</summary>
+                    <div class="table-scroll">
+                        <table class="plan-table">
+                            <thead>
+                                <tr>
+                                    <th data-sort="order" style="cursor:pointer">#</th>
+                                    <th data-sort="path" style="cursor:pointer">Path</th>
+                                    <th data-sort="logic" style="cursor:pointer">Logic applied</th>
+                                    <th data-sort="target" style="cursor:pointer">Target volume</th>
+                                    <th data-sort="size" style="cursor:pointer">Total Size</th>
+                                    <th data-sort="moved" style="cursor:pointer">Size Moved</th>
+                                </tr>
+                            </thead>
+                            <tbody id="placement-tbody"></tbody>
+                        </table>
+                    </div>
+                </details>`;
+
+            renderPlacementTable();
             renderVolumeDetails();
+
+            document.querySelectorAll('th[data-sort]').forEach(th => {
+                th.addEventListener('click', () => {
+                    const sortKey = th.dataset.sort;
+                    if (placementSortCol === sortKey) {
+                        placementSortDesc = !placementSortDesc;
+                    } else {
+                        placementSortCol = sortKey;
+                        placementSortDesc = false;
+                    }
+                    renderPlacementTable();
+                });
+            });
         }
 
         function renderVolumeDetails() {

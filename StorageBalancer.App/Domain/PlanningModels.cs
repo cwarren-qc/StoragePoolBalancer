@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Immutable;
-using System.IO;
 
 namespace StorageBalancer.App.Domain;
 
@@ -34,7 +33,7 @@ public sealed record PlanningFileCopy(
     long Size,
     long SizeOnDisk)
 {
-    public string FullPath => Path.Combine(RootFolderPath, RelativePath.Replace('\\', Path.DirectorySeparatorChar));
+    public string FullPath => System.IO.Path.Combine(RootFolderPath, RelativePath.Replace('\\', System.IO.Path.DirectorySeparatorChar));
 }
 
 public sealed record PlanningFolderCopy(
@@ -48,32 +47,14 @@ public sealed record PlanningFolderCopy(
 );
 
 public sealed record PlannedPlacement(
+    int Order,
     string RelativePath,
-    string ItemType,
     string RuleId,
-    string TargetDiskId,
-    string TargetDiskName,
-    string TargetAlias,
-    string TargetVolumeId,
-    string TargetMountPoint,
+    string LogicApplied,
+    ImmutableArray<VolumeProvenance> Targets,
     long SizeOnDisk,
-    string Reason
-);
-
-public sealed record PlannedMove(
-    string RelativePath,
-    string PlacementPath,
-    string SourceDiskId,
-    string SourceDiskName,
-    string SourceAlias,
-    string SourceVolumeId,
-    string SourcePath,
-    string TargetDiskId,
-    string TargetDiskName,
-    string TargetAlias,
-    string TargetVolumeId,
-    string DestinationPath,
-    long Size
+    long SizeMoved,
+    ImmutableArray<VolumeProvenance> Sources
 );
 
 public sealed record VolumeProvenance(string VolumeId, string Alias, long Size);
@@ -101,18 +82,11 @@ public sealed record VolumePlanSummary(
     ImmutableArray<VolumeTransferGroup> Outgoing
 );
 
-public sealed record SplitFolder(string RelativePath, string Reason);
-
-public sealed record UnplacedItem(string RelativePath, string ItemType, string RuleId, string Reason, long SizeOnDisk);
-
 public sealed record PlanningWarning(string Message);
 
 public sealed record PlacementPlan(
     DateTime SnapshotScannedAt,
     ImmutableArray<PlannedPlacement> Placements,
-    ImmutableArray<PlannedMove> Moves,
-    ImmutableArray<UnplacedItem> UnplacedItems,
-    ImmutableArray<SplitFolder> SplitFolders,
     ImmutableArray<PlanningWarning> Warnings,
     ImmutableArray<VolumePlanSummary> Volumes
 );
