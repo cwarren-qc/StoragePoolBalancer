@@ -59,15 +59,6 @@ public sealed record PlannedPlacement(
 
 public sealed record VolumeProvenance(string VolumeId, string Alias, long Size);
 
-public sealed record VolumeTransferGroup(
-    string RelativePath,
-    string OtherVolumeId,
-    string OtherAlias,
-    int FolderCount,
-    int FileCount,
-    long Size
-);
-
 public sealed record VolumePlanSummary(
     string VolumeId,
     string Alias,
@@ -77,9 +68,7 @@ public sealed record VolumePlanSummary(
     long FinalSize,
     bool IsEligible,
     string Status,
-    ImmutableArray<VolumeProvenance> Provenance,
-    ImmutableArray<VolumeTransferGroup> Incoming,
-    ImmutableArray<VolumeTransferGroup> Outgoing
+    ImmutableArray<VolumeProvenance> Provenance
 );
 
 public sealed record PlanningWarning(string Message);
