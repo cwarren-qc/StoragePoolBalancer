@@ -49,21 +49,28 @@ app.MapPost("/api/config", (AppConfig newConfig, ConfigManager configManager) =>
     if (newConfig.FilePlacementRules is null || newConfig.FilePlacementRules.Any(rule =>
         rule.FullRelativePath is null ||
         rule.StartingDepth < 1 ||
-        (!rule.DeferPlacement && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) ||
+        (!rule.DeferToFiller && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) ||
         rule.FullRelativePath.Replace('/', '\\').StartsWith('\\') ||
         rule.FullRelativePath.Split('\\', '/').Any(part => part == "..")))
     {
-        return Results.BadRequest(new { Error = "Each placement rule needs a relative path, a starting depth of at least 1, and one or more allowed volume aliases (unless Deferred)." });
+        return Results.BadRequest(new { Error = "Each placement rule needs a relative path, a starting depth of at least 1, and one or more allowed volume aliases (unless Defer to filler)." });
     }
 
     var aliases = newConfig.Volumes.Select(v => v.Alias.Trim()).ToArray();
     var configuredAliases = new HashSet<string>(aliases, StringComparer.OrdinalIgnoreCase);
 
     if (aliases.Distinct(StringComparer.OrdinalIgnoreCase).Count() != aliases.Length ||
-        newConfig.FilePlacementRules.Any(rule => rule.AllowedVolumeAliases.Any(a => !configuredAliases.Contains(a))))
+        newConfig.FilePlacementRules.Any(rule => rule.AllowedVolumeAliases.Any(a => a != "*" && !configuredAliases.Contains(a))))
     {
         return Results.BadRequest(new { Error = "Volume Aliases must be unique, and every allowed volume must be configured." });
     }
+
+    if (newConfig.Duplicates?.AllowedVolumeAliases != null)
+        newConfig.Duplicates.AllowedVolumeAliases.RemoveAll(a => a != "*" && !configuredAliases.Contains(a));
+    if (newConfig.Filler?.AllowedVolumeAliases != null)
+        newConfig.Filler.AllowedVolumeAliases.RemoveAll(a => a != "*" && !configuredAliases.Contains(a));
+    if (newConfig.Unmatched?.AllowedVolumeAliases != null)
+        newConfig.Unmatched.AllowedVolumeAliases.RemoveAll(a => a != "*" && !configuredAliases.Contains(a));
 
     configManager.Save(newConfig);
     return Results.Ok();
@@ -175,7 +182,13 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
         if (snapshot is null)
             return Results.NotFound(new { Error = "The selected snapshot was not found." });
 
-        return Results.Ok(planner.CreatePlan(snapshot, config.FilePlacementRules, request?.IncludeFiles ?? false));
+        return Results.Ok(planner.CreatePlan(
+            snapshot,
+            config.FilePlacementRules,
+            config.Duplicates,
+            config.Filler,
+            config.Unmatched,
+            request?.IncludeFiles ?? false));
     }
     catch (InvalidDataException exception)
     {

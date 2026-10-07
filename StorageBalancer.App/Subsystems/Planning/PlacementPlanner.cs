@@ -10,7 +10,24 @@ namespace StorageBalancer.App.Subsystems.Planning;
 
 public sealed class PlacementPlanner
 {
-    public PlacementPlan CreatePlan(PoolSnapshot snapshot, IReadOnlyList<FilePlacementRuleConfig> rules, bool includeFiles = false)
+    public PlacementPlan CreatePlan(PoolSnapshot snapshot, IReadOnlyList<FilePlacementRuleConfig> rules, bool includeFiles = false) =>
+        CreatePlan(snapshot, rules, null, null, null, includeFiles);
+
+    public PlacementPlan CreatePlan(
+        PoolSnapshot snapshot,
+        IReadOnlyList<FilePlacementRuleConfig> rules,
+        SpecialRuleConfig? duplicates,
+        SpecialRuleConfig? unmatched,
+        bool includeFiles = false) =>
+        CreatePlan(snapshot, rules, duplicates, null, unmatched, includeFiles);
+
+    public PlacementPlan CreatePlan(
+        PoolSnapshot snapshot,
+        IReadOnlyList<FilePlacementRuleConfig> rules,
+        SpecialRuleConfig? duplicates,
+        SpecialRuleConfig? filler,
+        SpecialRuleConfig? unmatched,
+        bool includeFiles = false)
     {
         rules ??= Array.Empty<FilePlacementRuleConfig>();
         if (snapshot.SchemaVersion != 1)
@@ -71,7 +88,7 @@ public sealed class PlacementPlanner
         foreach (var rule in rules)
         {
             if (rule is null || rule.StartingDepth < 1) continue;
-            if (!rule.DeferPlacement && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) continue;
+            if (!rule.DeferToFiller && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) continue;
 
             string rulePath = NormalizeRulePath(rule.FullRelativePath);
             ApplyRuleRecursive(root, rule, rulePath, null, ctx, duplicateRecord);
@@ -94,9 +111,11 @@ public sealed class PlacementPlanner
         foreach (var kvp in ctx.Unassigned)
         {
             bool first = true;
+            int dupIdx = 1;
+            string rootChunk = CleanRootChunkName(null, kvp.Key.RelativePath);
             foreach (var copy in kvp.Value)
             {
-                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", first ? unmatchedRecord : duplicateRecord));
+                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", first ? unmatchedRecord : duplicateRecord, rootChunk, first ? 0 : dupIdx++));
                 first = false;
             }
         }
@@ -104,8 +123,44 @@ public sealed class PlacementPlanner
         ctx.MatchRecords.Add(duplicateRecord);
         ctx.MatchRecords.Add(unmatchedRecord);
 
-        ProcessDeferredStayPut(ctx);
-        ProcessDeferredEmptiest(ctx);
+        // 1. Separate deferred copies by category
+        var fillerDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == "Filler Placement").ToList();
+        var unmatchedDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == "None").ToList();
+        var duplicateDeferred = ctx.Deferred.Where(d => d.CopyIndex > 0).ToList();
+
+        var fillerAllowedTargets = (filler?.AllowedVolumeAliases != null && filler.AllowedVolumeAliases.Count > 0 && !filler.AllowedVolumeAliases.Contains("*"))
+            ? ctx.Targets.Where(t => filler.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList()
+            : null;
+
+        var duplicateAllowedTargets = (duplicates?.AllowedVolumeAliases != null && duplicates.AllowedVolumeAliases.Count > 0 && !duplicates.AllowedVolumeAliases.Contains("*"))
+            ? ctx.Targets.Where(t => duplicates.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList()
+            : null;
+
+        var unmatchedAllowedTargets = (unmatched?.AllowedVolumeAliases != null && unmatched.AllowedVolumeAliases.Count > 0 && !unmatched.AllowedVolumeAliases.Contains("*"))
+            ? ctx.Targets.Where(t => unmatched.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList()
+            : null;
+
+        // Process filler rules (primary copies of paths with Defer to filler)
+        ctx.Deferred = fillerDeferred;
+        ProcessDeferredStayPut(ctx, fillerAllowedTargets);
+        ProcessDeferredEmptiest(ctx, fillerAllowedTargets);
+
+        // Process duplicates
+        if (duplicates?.Consolidate == true)
+        {
+            ProcessConsolidatedDuplicates(duplicateDeferred, ctx, duplicateAllowedTargets, duplicateRecord);
+        }
+        else
+        {
+            ctx.Deferred = duplicateDeferred;
+            ProcessDeferredStayPut(ctx, duplicateAllowedTargets);
+            ProcessDeferredEmptiest(ctx, duplicateAllowedTargets);
+        }
+
+        // Process unmatched catch-all at the very end
+        ctx.Deferred = unmatchedDeferred;
+        ProcessDeferredStayPut(ctx, unmatchedAllowedTargets);
+        ProcessDeferredEmptiest(ctx, unmatchedAllowedTargets);
 
         foreach (var kvp in ctx.DeferredDueToSpace.Where(x => x.Value > 0))
         {
@@ -178,20 +233,19 @@ public sealed class PlacementPlanner
         {
             MatchRecord? currentRecord = inheritedRecord;
 
-            if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
+            if (rule.DeferToFiller)
             {
-                currentRecord = new MatchRecord(folder.RelativePath, ctx.DecisionCounter++);
-                ctx.MatchRecords.Add(currentRecord);
-            }
-
-            if (rule.DeferPlacement)
-            {
-                if (currentRecord == null && string.IsNullOrEmpty(folder.RelativePath))
+                if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
+                {
+                    currentRecord = new MatchRecord($"{folder.RelativePath} [filler]", ctx.DecisionCounter++);
+                    ctx.MatchRecords.Add(currentRecord);
+                }
+                else if (currentRecord == null && string.IsNullOrEmpty(folder.RelativePath))
                 {
                     var loose = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
                     if (loose.Count > 0)
                     {
-                        currentRecord = new MatchRecord("<Pool Root> (Loose files)", ctx.DecisionCounter++);
+                        currentRecord = new MatchRecord("<Pool Root> (Loose files) [filler]", ctx.DecisionCounter++);
                         ctx.MatchRecords.Add(currentRecord);
                     }
                 }
@@ -203,7 +257,15 @@ public sealed class PlacementPlanner
                 return;
             }
 
-            var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
+            if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
+            {
+                currentRecord = new MatchRecord(folder.RelativePath, ctx.DecisionCounter++);
+                ctx.MatchRecords.Add(currentRecord);
+            }
+
+            var allowedTargets = rule.AllowedVolumeAliases.Contains("*")
+                ? ctx.Targets.ToList()
+                : ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
 
             if (string.IsNullOrEmpty(folder.RelativePath))
             {
@@ -299,16 +361,19 @@ public sealed class PlacementPlanner
 
     private static void AssignOrSplitChunk(List<PlanningFile> files, string chunkName, FilePlacementRuleConfig rule, PlanContext ctx, MatchRecord duplicateRecord)
     {
-        var currentRecord = new MatchRecord(chunkName, ctx.DecisionCounter++);
+        string recordName = rule.DeferToFiller ? $"{chunkName} [filler]" : chunkName;
+        var currentRecord = new MatchRecord(recordName, ctx.DecisionCounter++);
         ctx.MatchRecords.Add(currentRecord);
 
-        if (rule.DeferPlacement)
+        if (rule.DeferToFiller)
         {
             foreach (var file in files) DeferFile(file, currentRecord, duplicateRecord, ctx);
             return;
         }
 
-        var allowedTargets = ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
+        var allowedTargets = rule.AllowedVolumeAliases.Contains("*")
+            ? ctx.Targets.ToList()
+            : ctx.Targets.Where(t => rule.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList();
 
         long logicalSize = files.Sum(f => f.SizeOnDisk);
         var currentAffinity = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -388,10 +453,12 @@ public sealed class PlacementPlanner
         set.Add(target.Alias);
         target.RemainingSpace -= primaryCopy.SizeOnDisk;
 
+        int dupIdx = 1;
+        string rootChunk = CleanRootChunkName(record?.Path, file.RelativePath);
         foreach (var copy in copies)
         {
             if (copy == primaryCopy) continue;
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", duplicateRecord));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", duplicateRecord, rootChunk, dupIdx++));
         }
     }
 
@@ -400,20 +467,24 @@ public sealed class PlacementPlanner
         var copies = ctx.Unassigned[file];
         ctx.Unassigned.Remove(file);
 
+        string rootChunk = CleanRootChunkName(record?.Path, file.RelativePath);
         bool isPrimary = true;
+        int dupIdx = 1;
         foreach (var copy in copies)
         {
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Placement", isPrimary ? record : duplicateRecord));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Filler Placement", isPrimary ? record : duplicateRecord, rootChunk, isPrimary ? 0 : dupIdx++));
             isPrimary = false;
         }
     }
 
-    private static void ProcessDeferredStayPut(PlanContext ctx)
+    private static void ProcessDeferredStayPut(PlanContext ctx, List<PlanningTarget>? allowedTargetsOverride = null)
     {
         var remainingDeferred = new List<DeferredCopy>();
+        var allowedTargets = allowedTargetsOverride ?? ctx.Targets;
+
         foreach (var def in ctx.Deferred)
         {
-            var target = ctx.Targets.FirstOrDefault(t => string.Equals(t.Alias, def.Copy.VolumeAlias, StringComparison.OrdinalIgnoreCase));
+            var target = allowedTargets.FirstOrDefault(t => string.Equals(t.Alias, def.Copy.VolumeAlias, StringComparison.OrdinalIgnoreCase));
             var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
 
             if (target != null && target.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(target.Alias)))
@@ -454,16 +525,27 @@ public sealed class PlacementPlanner
         ctx.Deferred = remainingDeferred;
     }
 
-    private static void ProcessDeferredEmptiest(PlanContext ctx)
+    private static void ProcessDeferredEmptiest(PlanContext ctx, List<PlanningTarget>? allowedTargetsOverride = null)
     {
         var remainingDeferred = new List<DeferredCopy>();
+        var allowedTargets = allowedTargetsOverride ?? ctx.Targets;
+
         foreach (var def in ctx.Deferred)
         {
             var assigned = ctx.AssignedVolumes.TryGetValue(def.File, out var set) ? set : null;
-            var target = ctx.Targets
+            var target = allowedTargets
                 .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(t.Alias)))
                 .OrderByDescending(t => t.RemainingSpace)
                 .FirstOrDefault();
+
+            if (target == null && allowedTargetsOverride != null)
+            {
+                // Fallback: if configured targets lack space, ignore restriction and check all pool targets
+                target = ctx.Targets
+                    .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk && (assigned == null || !assigned.Contains(t.Alias)))
+                    .OrderByDescending(t => t.RemainingSpace)
+                    .FirstOrDefault();
+            }
 
             if (target != null)
             {
@@ -513,6 +595,7 @@ public sealed class PlacementPlanner
             ctx.CopyDestinations[def.Copy] = def.Copy.VolumeAlias;
             if (def.Record != null)
             {
+                ctx.DeferredDueToSpace[def.Record.Path] = ctx.DeferredDueToSpace.GetValueOrDefault(def.Record.Path) + def.Copy.SizeOnDisk;
                 def.Record.TotalSize += def.Copy.SizeOnDisk;
                 def.Record.Targets[def.Copy.VolumeAlias] = def.Record.Targets.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
                 def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
@@ -529,6 +612,183 @@ public sealed class PlacementPlanner
                     def.Copy.SizeOnDisk));
             }
         }
+    }
+
+    private static void ProcessConsolidatedDuplicates(
+        List<DeferredCopy> duplicates,
+        PlanContext ctx,
+        List<PlanningTarget>? allowedTargetsOverride,
+        MatchRecord fallbackDuplicateRecord)
+    {
+        var duplicateGroups = duplicates
+            .GroupBy(d => d.CopyIndex == 1
+                ? $"{d.RootChunkName} [duplicate]"
+                : $"{d.RootChunkName} [duplicate #{d.CopyIndex}]")
+            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var allowedTargets = allowedTargetsOverride ?? ctx.Targets;
+        int nextDuplicateOrder = 999910;
+
+        foreach (var group in duplicateGroups)
+        {
+            var groupRecord = new MatchRecord(group.Key, nextDuplicateOrder++);
+            ctx.MatchRecords.Add(groupRecord);
+
+            long groupSize = group.Sum(d => d.Copy.SizeOnDisk);
+
+            // An eligible target volume must not already hold any file in this group
+            var eligibleTargets = allowedTargets
+                .Where(t => group.All(def => !ctx.AssignedVolumes.TryGetValue(def.File, out var assigned) || !assigned.Contains(t.Alias)))
+                .ToList();
+
+            var currentAffinity = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (var def in group)
+            {
+                currentAffinity[def.Copy.VolumeAlias] = currentAffinity.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+            }
+
+            var bestTarget = eligibleTargets
+                .Where(t => t.RemainingSpace >= groupSize)
+                .OrderByDescending(t => currentAffinity.GetValueOrDefault(t.Alias))
+                .ThenByDescending(t => t.RemainingSpace)
+                .FirstOrDefault();
+
+            if (bestTarget != null)
+            {
+                // Consolidate all duplicate files in this group onto bestTarget
+                foreach (var def in group)
+                {
+                    ctx.CopyDestinations[def.Copy] = bestTarget.Alias;
+                    bestTarget.RemainingSpace -= def.Copy.SizeOnDisk;
+
+                    if (!ctx.AssignedVolumes.TryGetValue(def.File, out var assigned))
+                    {
+                        assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        ctx.AssignedVolumes[def.File] = assigned;
+                    }
+                    assigned.Add(bestTarget.Alias);
+
+                    groupRecord.TotalSize += def.Copy.SizeOnDisk;
+                    groupRecord.Targets[bestTarget.Alias] = groupRecord.Targets.GetValueOrDefault(bestTarget.Alias) + def.Copy.SizeOnDisk;
+                    groupRecord.Sources[def.Copy.VolumeAlias] = groupRecord.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+
+                    if (!string.Equals(def.Copy.VolumeAlias, bestTarget.Alias, StringComparison.OrdinalIgnoreCase))
+                    {
+                        groupRecord.MovedSize += def.Copy.SizeOnDisk;
+                        groupRecord.MovedSources[def.Copy.VolumeAlias] = groupRecord.MovedSources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+                    }
+
+                    groupRecord.Files.Add(new PlannedFileItem(
+                        def.File.Name,
+                        def.File.RelativePath,
+                        def.Copy.VolumeAlias,
+                        def.Copy.MountPoint,
+                        def.Copy.RootFolderPath,
+                        def.Copy.FullPath,
+                        bestTarget.Alias,
+                        def.Copy.Size,
+                        def.Copy.SizeOnDisk));
+                }
+            }
+            else
+            {
+                // Group exceeds capacity of single target; distribute individually across eligible targets (split)
+                foreach (var def in group)
+                {
+                    var fileTarget = allowedTargets
+                        .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk &&
+                                    (!ctx.AssignedVolumes.TryGetValue(def.File, out var assigned) || !assigned.Contains(t.Alias)))
+                        .OrderByDescending(t => string.Equals(t.Alias, def.Copy.VolumeAlias, StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                        .ThenByDescending(t => t.RemainingSpace)
+                        .FirstOrDefault();
+
+                    // If file cannot fit on allowed targets, ignore eligible volume restriction and find ANY pool volume that fits respecting copy exclusivity
+                    if (fileTarget == null && allowedTargetsOverride != null)
+                    {
+                        fileTarget = ctx.Targets
+                            .Where(t => t.RemainingSpace >= def.Copy.SizeOnDisk &&
+                                        (!ctx.AssignedVolumes.TryGetValue(def.File, out var assigned) || !assigned.Contains(t.Alias)))
+                            .OrderByDescending(t => string.Equals(t.Alias, def.Copy.VolumeAlias, StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+                            .ThenByDescending(t => t.RemainingSpace)
+                            .FirstOrDefault();
+                    }
+
+                    var chosenTarget = fileTarget;
+                    if (chosenTarget != null)
+                    {
+                        ctx.CopyDestinations[def.Copy] = chosenTarget.Alias;
+                        chosenTarget.RemainingSpace -= def.Copy.SizeOnDisk;
+
+                        if (!ctx.AssignedVolumes.TryGetValue(def.File, out var assigned))
+                        {
+                            assigned = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                            ctx.AssignedVolumes[def.File] = assigned;
+                        }
+                        assigned.Add(chosenTarget.Alias);
+
+                        groupRecord.TotalSize += def.Copy.SizeOnDisk;
+                        groupRecord.Targets[chosenTarget.Alias] = groupRecord.Targets.GetValueOrDefault(chosenTarget.Alias) + def.Copy.SizeOnDisk;
+                        groupRecord.Sources[def.Copy.VolumeAlias] = groupRecord.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+
+                        if (!string.Equals(def.Copy.VolumeAlias, chosenTarget.Alias, StringComparison.OrdinalIgnoreCase))
+                        {
+                            groupRecord.MovedSize += def.Copy.SizeOnDisk;
+                            groupRecord.MovedSources[def.Copy.VolumeAlias] = groupRecord.MovedSources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+                        }
+
+                        groupRecord.Files.Add(new PlannedFileItem(
+                            def.File.Name,
+                            def.File.RelativePath,
+                            def.Copy.VolumeAlias,
+                            def.Copy.MountPoint,
+                            def.Copy.RootFolderPath,
+                            def.Copy.FullPath,
+                            chosenTarget.Alias,
+                            def.Copy.Size,
+                            def.Copy.SizeOnDisk));
+                    }
+                    else
+                    {
+                        // Fallback: entire pool has no room; leave in place and record space deficit
+                        ctx.DeferredDueToSpace[groupRecord.Path] = ctx.DeferredDueToSpace.GetValueOrDefault(groupRecord.Path) + def.Copy.SizeOnDisk;
+                        ctx.CopyDestinations[def.Copy] = def.Copy.VolumeAlias;
+                        groupRecord.TotalSize += def.Copy.SizeOnDisk;
+                        groupRecord.Targets[def.Copy.VolumeAlias] = groupRecord.Targets.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+                        groupRecord.Sources[def.Copy.VolumeAlias] = groupRecord.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+
+                        groupRecord.Files.Add(new PlannedFileItem(
+                            def.File.Name,
+                            def.File.RelativePath,
+                            def.Copy.VolumeAlias,
+                            def.Copy.MountPoint,
+                            def.Copy.RootFolderPath,
+                            def.Copy.FullPath,
+                            def.Copy.VolumeAlias,
+                            def.Copy.Size,
+                            def.Copy.SizeOnDisk));
+                    }
+                }
+            }
+        }
+    }
+
+    private static string CleanRootChunkName(string? path, string fileRelativePath)
+    {
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            if (path.EndsWith(" [filler]", StringComparison.OrdinalIgnoreCase))
+                path = path[..^" [filler]".Length];
+            if (path.StartsWith("<Pool Root>", StringComparison.OrdinalIgnoreCase))
+                return "<Pool Root>";
+            if (path.EndsWith("\\* (Loose files)", StringComparison.OrdinalIgnoreCase))
+                return path[..^"\\* (Loose files)".Length];
+            return path;
+        }
+
+        if (string.IsNullOrWhiteSpace(fileRelativePath)) return "<Pool Root>";
+        var parts = fileRelativePath.Split('\\', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 1 ? parts[0] : "<Pool Root>";
     }
 
     private static ImmutableArray<VolumePlanSummary> BuildVolumeSummaries(PoolSnapshot snapshot, PlanContext ctx)
@@ -837,5 +1097,5 @@ public sealed class PlacementPlanner
         public long OtherItemsSizeOnDisk { get; } = otherItemsSizeOnDisk;
     }
 
-    private sealed record DeferredCopy(PlanningFile File, PlanningFileCopy Copy, string Reason, MatchRecord Record);
+    private sealed record DeferredCopy(PlanningFile File, PlanningFileCopy Copy, string Reason, MatchRecord? Record, string RootChunkName = "", int CopyIndex = 0);
 }

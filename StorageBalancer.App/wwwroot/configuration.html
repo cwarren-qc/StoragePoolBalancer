@@ -48,6 +48,11 @@
         .pill { padding:4px 10px; border-radius:99px; font-size:11px; font-weight:700; cursor:pointer; user-select:none; transition:all 0.15s; border:1px solid var(--line); background:var(--surface); color:var(--muted); }
         .pill.active { background:var(--green); border-color:var(--green); color:white; }
         .pill:hover:not(.active) { border-color:var(--muted); color:var(--ink); }
+        .pill.pill-all { border: 1px dashed #3182ce; color: #2b6cb0; background: transparent; font-weight: 700; }
+        .pill.pill-all:hover:not(.active) { border-color: #2b6cb0; background: rgb(49 130 206 / 10%); }
+        .pill.pill-all.active { background: #2b6cb0; border-color: #2b6cb0; color: white; }
+        .pill.inherited-all { border: 1px solid var(--green) !important; box-shadow: inset 0 0 0 1px var(--green); background: transparent !important; color: var(--green) !important; font-weight: 700; }
+        .pill-divider { width: 1px; height: 16px; background: var(--line); margin: 0 4px; display: inline-block; }
 
         .scan-table { width:100%; border-collapse:collapse; font-size:13px; table-layout:fixed; }
         .scan-table th { text-align:left; font-size:11px; font-weight:750; color:var(--muted); text-transform:uppercase; padding:8px; border-bottom:1px solid var(--line); }
@@ -71,12 +76,15 @@
         .notice { font-size:13px; margin-bottom:12px; padding:12px 16px; border-radius:6px; display:none; }
         .notice.error { color:#842029; background-color:#f8d7da; border:1px solid #f5c2c7; display:block; }
         .notice.success { color:#0f5132; background-color:#d1e7dd; border:1px solid #badbcc; display:block; }
+        .notice.info { color:var(--deep); background-color:#eaf2ed; border:1px solid #c2dbcd; display:flex; align-items:center; gap:10px; }
+        .spinner { width:14px; height:14px; border:2px solid currentColor; border-top-color:transparent; border-radius:50%; animation:spin 0.8s linear infinite; display:inline-block; vertical-align:middle; flex-shrink:0; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
         /* Nested Collapsables */
         .sub-details { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 20px; background: #fffefa; }
         .sub-details > summary { padding: 12px 16px; font-size: 14px; background: color-mix(in srgb, var(--paper) 60%, transparent); border-radius: 6px; }
         .sub-details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--line); }
-        .sub-details:not([open]) > summary .btn { display: none; }
+        .sub-details:not([open]) > summary .btn, .sub-details:not([open]) > summary .drivepool-toggle { display: none !important; }
         .sub-content { padding: 16px; }
 
         /* Ordering Buttons */
@@ -142,26 +150,27 @@
                             <div class="field-header" title="Folder directory where storage pool scan snapshots (.json) are stored and loaded">Snapshots Folder</div>
                             <input type="text" id="cfg-snapshot-dir" placeholder="E:\Snapshots">
                         </div>
-                        <div class="field" style="display:flex; align-items:center; gap:8px; margin-top:16px;">
-                            <input type="checkbox" id="cfg-drivepool" style="width:16px;">
-                            <label for="cfg-drivepool" style="font-size:13px; font-weight:600; cursor:pointer;" title="DrivePool mode: When enabled, the Root Folder will be determined automatically (e.g. 'PoolPart.*').">DrivePool Mode</label>
-                        </div>
                     </div>
                 </div>
 
                 <!-- VOLUMES SUB-SECTION -->
                 <details class="sub-details" open>
-                    <summary>
+                    <summary style="display:flex; justify-content:space-between; align-items:center;">
                         <span title="Physical or logical volumes participating in the storage pool">Volumes</span>
-                        <button class="btn" onclick="event.preventDefault(); addVolume()" title="Add a new volume to the pool configuration">+ Add Volume</button>
+                        <div style="display:flex; align-items:center; gap:16px;">
+                            <label for="cfg-drivepool" class="drivepool-toggle" onclick="event.stopPropagation();" style="display:inline-flex; align-items:center; gap:6px; font-size:12px; font-weight:600; cursor:pointer;" title="DrivePool mode: When enabled, the Root Folder will be determined automatically (PoolPart.*, and it's not hidden).">
+                                <input type="checkbox" id="cfg-drivepool" style="width:14px; height:14px;" onchange="toggleRootFolders()"> DrivePool Mode
+                            </label>
+                            <button class="btn" onclick="event.preventDefault(); addVolume()" title="Add a new volume to the pool configuration">+ Add Volume</button>
+                        </div>
                     </summary>
                     <div class="sub-content">
                         <div class="vol-headers" id="vol-headers">
                             <div class="field-header" title="Short identifier for the volume (e.g. M01) used in rules and balancing reports">Alias</div>
                             <div class="field-header" title="Local drive letter or directory path where the volume is mounted (e.g. R:\ or C:\Mount\Vol1)">Mount Point</div>
+                            <div class="field-header root-header" title="Relative folder path inside the mount point where pool content begins (leave blank if at volume root). In DrivePool mode, Root Folder will be determined automatically (PoolPart.*, and it's not hidden).">Root Folder</div>
                             <div class="field-header" title="Total usable storage capacity of the volume in GiB">Capacity</div>
-                            <div class="field-header" title="Used only to limit to one action at a times on volumes sharing the same physical disk">Physical Disk</div>
-                            <div class="field-header root-header" title="Relative folder path inside the mount point where pool content begins (leave blank if at volume root).">Root Folder</div>
+                            <div class="field-header" title="Only use when more then one volume are on the same physical disk, the name is not important, This allows the tool to limit to one action at a times on those volumes">Physical Disk</div>
                             <div></div>
                         </div>
                         <div id="volumes-container"></div>
@@ -184,19 +193,15 @@
 
         <!-- STATE SCANNER -->
         <details id="details-scan">
-            <summary>
+            <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
                 <div class="summary-title">🔍 State Scanner <span class="summary-subtitle" id="scan-subtitle"></span></div>
+                <div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">
+                    <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)" title="Optional custom name for this scan snapshot. Defaults to date and time if empty" style="width:220px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;">
+                    <button class="btn danger" id="btn-scan-cancel" onclick="event.stopPropagation(); cancelScan()" hidden title="Cancel the currently running pool scan">Cancel Scan</button>
+                    <button class="btn primary" id="btn-scan-start" onclick="event.stopPropagation(); document.getElementById('details-scan').open = true; startScan();" title="Start scanning all configured volumes to catalog files, folders, and sizes">Start Pool Scan</button>
+                </div>
             </summary>
             <div class="content">
-                <div class="toolbar">
-                    <div class="field" style="width:300px;">
-                        <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)" title="Optional custom name for this scan snapshot. Defaults to date and time if empty">
-                    </div>
-                    <div style="display:flex; gap:8px;">
-                        <button class="btn danger" id="btn-scan-cancel" onclick="cancelScan()" hidden title="Cancel the currently running pool scan">Cancel Scan</button>
-                        <button class="btn primary" id="btn-scan-start" onclick="startScan()" title="Start scanning all configured volumes to catalog files, folders, and sizes">Start Pool Scan</button>
-                    </div>
-                </div>
                 <table class="scan-table">
                 <thead>
                         <tr>
@@ -218,16 +223,14 @@
 
         <!-- SIMULATION & PREVIEW -->
         <details id="details-plan">
-            <summary>
-                <div class="summary-title">📊 Simulation & Preview</div>
+            <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="summary-title">📊 Simulation & Preview <span class="summary-subtitle" id="plan-subtitle"></span></div>
+                <div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">
+                    <select id="plan-snapshot-select" style="max-width:280px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;"><option value="">Loading snapshots...</option></select>
+                    <button class="btn primary" id="btn-plan-generate" onclick="event.stopPropagation(); document.getElementById('details-plan').open = true; generatePlan();">Generate Preview</button>
+                </div>
             </summary>
             <div class="content">
-                <div class="toolbar">
-                    <div class="field" style="width:300px;">
-                        <select id="plan-snapshot-select"><option value="">Loading snapshots...</option></select>
-                    </div>
-                    <button class="btn primary" id="btn-plan-generate" onclick="generatePlan()">Generate Preview</button>
-                </div>
                 <div id="plan-notice" class="notice"></div>
 
                 <div id="plan-results" style="margin-top:20px;"></div>
@@ -256,6 +259,9 @@
 
                 state.config.volumes = state.config.volumes || [];
                 state.config.filePlacementRules = state.config.filePlacementRules || [];
+                state.config.duplicates = state.config.duplicates || { consolidate: false, allowedVolumeAliases: [] };
+                state.config.filler = state.config.filler || { allowedVolumeAliases: [] };
+                state.config.unmatched = state.config.unmatched || { allowedVolumeAliases: [] };
 
                 document.getElementById('cfg-snapshot-dir').value = state.config.snapshotsFolder || '';
                 document.getElementById('cfg-drivepool').checked = state.config.drivePoolMode;
@@ -305,18 +311,42 @@
                 };
             });
 
-            // Save rules
-            const ruleCards = document.querySelectorAll('.rule-card');
+            // Save user rules
+            const ruleCards = document.querySelectorAll('.rule-card:not(.rule-card-special)');
             state.config.filePlacementRules = Array.from(ruleCards).map(card => {
                 const isDef = card.querySelector('.r-def').checked;
-                const allowedAliases = isDef ? [] : Array.from(card.querySelectorAll('.pill.active')).map(p => p.textContent.trim());
+                const isAllActive = card.querySelector('.pill-all')?.classList.contains('active');
+                const allowedAliases = isDef ? [] : (isAllActive ? ['*'] : Array.from(card.querySelectorAll('.pill:not(.pill-all).active')).map(p => p.textContent.trim()));
                 return {
                     fullRelativePath: card.querySelector('.r-path').value.trim().replace(/\//g, '\\'),
                     startingDepth: parseInt(card.querySelector('.r-depth').value) || 1,
-                    deferPlacement: isDef,
+                    deferToFiller: isDef,
                     allowedVolumeAliases: allowedAliases
                 };
             });
+
+            // Save special rules (Duplicates, Filler, Unmatched)
+            const dupConsolidate = document.getElementById('duplicate-consolidate')?.checked || false;
+            const dupIsAllActive = document.querySelector('#duplicate-pills .pill-all')?.classList.contains('active');
+            const dupPills = dupIsAllActive ? ['*'] : Array.from(document.querySelectorAll('#duplicate-pills .pill:not(.pill-all).active')).map(p => p.textContent.trim());
+            state.config.duplicates = {
+                consolidate: dupConsolidate,
+                allowedVolumeAliases: dupPills
+            };
+
+            const fillerIsAllActive = document.querySelector('#filler-pills .pill-all')?.classList.contains('active');
+            const fillerPills = fillerIsAllActive ? ['*'] : Array.from(document.querySelectorAll('#filler-pills .pill:not(.pill-all).active')).map(p => p.textContent.trim());
+            state.config.filler = {
+                consolidate: false,
+                allowedVolumeAliases: fillerPills
+            };
+
+            const unmatchedIsAllActive = document.querySelector('#unmatched-pills .pill-all')?.classList.contains('active');
+            const unmatchedPills = unmatchedIsAllActive ? ['*'] : Array.from(document.querySelectorAll('#unmatched-pills .pill:not(.pill-all).active')).map(p => p.textContent.trim());
+            state.config.unmatched = {
+                consolidate: false,
+                allowedVolumeAliases: unmatchedPills
+            };
         }
 
         function addVolume() {
@@ -350,7 +380,7 @@
             e.preventDefault(); // Necessary to allow dropping
             e.dataTransfer.dropEffect = 'move';
             const card = e.target.closest('.rule-card');
-            if (card && card.dataset.index != draggedRuleIndex) {
+            if (card && !card.classList.contains('rule-card-special') && card.dataset.index != draggedRuleIndex) {
                 card.classList.add('drag-over');
             }
             return false;
@@ -366,7 +396,7 @@
         function handleDrop(e, targetIdx) {
             e.stopPropagation();
             e.preventDefault();
-            if (draggedRuleIndex !== null && draggedRuleIndex !== targetIdx) {
+            if (draggedRuleIndex !== null && draggedRuleIndex !== targetIdx && targetIdx < state.config.filePlacementRules.length) {
                 const rules = state.config.filePlacementRules;
                 const [movedRule] = rules.splice(draggedRuleIndex, 1);
                 rules.splice(targetIdx, 0, movedRule);
@@ -385,19 +415,35 @@
         // --- Rule Rendering ---
         function renderRules() {
             const container = document.getElementById('rules-container');
-            const rules = state.config.filePlacementRules;
+            const rules = state.config.filePlacementRules || [];
+            const aliases = (state.config.volumes || []).map(v => v.alias || '(Empty)');
 
-            if (!rules.length) { container.innerHTML = '<div style="color:var(--muted); font-size:13px;">No rules defined.</div>'; return; }
+            function renderPillList(allowedList) {
+                if (!aliases.length) return '<span style="font-size:11px; color:var(--muted);">Add a volume first</span>';
+                const isAll = (allowedList || []).includes('*');
+                const allowed = new Set(allowedList || []);
+                return `
+                    <div class="pill pill-all ${isAll ? 'active' : ''}" onclick="toggleAllPill(this)" title="Always allow all pool volumes (including any drives added later)">✦ All</div>
+                    <div class="pill-divider"></div>` +
+                    aliases.map(a =>
+                        `<div class="pill ${isAll ? 'inherited-all' : (allowed.has(a) ? 'active' : '')}" onclick="togglePill(this)">${escapeHtml(a)}</div>`
+                    ).join('');
+            }
 
-            const aliases = state.config.volumes.map(v => v.alias || '(Empty)');
+            const defDup = state.config.duplicates || { consolidate: false, allowedVolumeAliases: [] };
+            const defDupPills = renderPillList(defDup.allowedVolumeAliases);
 
-            container.innerHTML = rules.map((r, i) => {
-                const isDef = r.deferPlacement;
-                const allowed = new Set(r.allowedVolumeAliases || []);
+            const filler = state.config.filler || { allowedVolumeAliases: [] };
+            const fillerPills = renderPillList(filler.allowedVolumeAliases);
 
-                const pills = aliases.map(a =>
-                    `<div class="pill ${allowed.has(a)?'active':''}" onclick="togglePill(this)">${escapeHtml(a)}</div>`
-                ).join('');
+            const defUnmatched = state.config.unmatched || { allowedVolumeAliases: [] };
+            const defUnmatchedPills = renderPillList(defUnmatched.allowedVolumeAliases);
+
+            const hasFillerRules = rules.some(r => r.deferToFiller);
+
+            let userRulesHtml = rules.map((r, i) => {
+                const isDef = r.deferToFiller;
+                const pills = renderPillList(r.allowedVolumeAliases);
 
                 return `
                 <div class="rule-card" data-index="${i}" draggable="true"
@@ -410,8 +456,8 @@
                             <button class="move-btn" onclick="moveRule(${i}, 'down')" title="Move rule down (evaluated later)">↓</button>
                         </div>
                         <div class="field"><input type="text" class="r-path" value="${escapeHtml(r.fullRelativePath)}" placeholder="Path (e.g. Movies)" title="Root-relative folder path in the pool to balance (e.g. Movies, Backups, or leave blank for entire pool)"></div>
-                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;" title="When checked, files in this path are not assigned immediately to dedicated target volumes. They'll be assigned after all the other rules are processed, remaining on their current drive if space allows, or balance onto emptiest drives if needed.">
-                            <input type="checkbox" class="r-def" ${isDef?'checked':''} onchange="toggleRuleDef(this)"> Defer placement
+                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;" title="Postpones placing these files until all consolidated rules have run. Files stay on their current drive if space allows, or scatter individually across target volumes to fill remaining space without folder consolidation.">
+                            <input type="checkbox" class="r-def" ${isDef?'checked':''} onchange="toggleRuleDef(this)"> Defer to filler
                         </label>
                         <div class="field r-depth-container" style="display:${isDef ? 'none' : 'flex'}; align-items:center; gap:6px;" title="Starting Depth: Folder nesting level at which rules apply. Depth 1 balances this entire folder as a single unit onto one volume. Depth 2 splits and balances immediate subfolders independently across target volumes. Higher depths balance deeper subfolders.">
                             <span style="font-size:12px; color:var(--muted);">Depth:</span>
@@ -420,16 +466,143 @@
                         <button class="remove-btn" onclick="if(confirm('Are you sure you want to delete this rule?')) removeRule(${i})" title="Remove Rule">×</button>
                     </div>
                     <div class="rule-row-2 ${isDef?'hidden':''}">
-                        <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Allowed target volumes where files matching this rule may be placed. Click volumes to toggle allowed targets.">TARGETS:</span>
-                        ${pills || '<span style="font-size:11px; color:var(--muted);">Add a volume first</span>'}
+                        <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Allowed target volumes where files matching this rule may be placed. Click volumes or choose '✦ All'.">TARGETS:</span>
+                        <div class="rule-pills-container" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                            ${pills}
+                        </div>
                     </div>
                 </div>
                 `;
             }).join('');
+
+            if (rules.length === 0) {
+                userRulesHtml = '<div style="color:var(--muted); font-size:13px; margin-bottom:12px;">No custom rules defined (all files will follow placement below).</div>';
+            }
+
+            const duplicateHtml = `
+            <div class="rule-card rule-card-special" style="border-left: 3px solid var(--muted); background: #fdfdfc;">
+                <div class="rule-row-1" style="grid-template-columns: auto 1fr auto;">
+                    <div style="display:flex; align-items:center;">
+                        <span style="font-size:11px; font-weight:800; color:var(--deep); background:#ecefe9; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;" title="Duplicate file copies (e.g. DrivePool mirrored copies). Processed after all custom rules.">DUPLICATE</span>
+                    </div>
+                    <div></div>
+                    <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;" title="Consolidate duplicate copies: When checked, tries to place all duplicate copies under a folder (grouped by rule depth) onto the same volume (1 copy per volume) rather than dispersing them across emptiest volumes.">
+                        <input type="checkbox" id="duplicate-consolidate" ${defDup.consolidate ? 'checked' : ''}> Consolidate
+                    </label>
+                </div>
+                <div class="rule-row-2">
+                    <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Preferred target volumes for duplicate copies. If preferred volumes are full, all pool volumes will be used. Click volumes or choose '✦ All'.">TARGETS:</span>
+                    <div id="duplicate-pills" class="rule-pills-container" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                        ${defDupPills}
+                    </div>
+                </div>
+                <div style="margin-top:6px; font-size:11px; color:var(--muted); font-style:italic;">Selected targets are preferred; all pool volumes will be used if preferred volumes are full.</div>
+            </div>
+            `;
+
+            const fillerHtml = `
+            <div id="rule-card-filler" class="rule-card rule-card-special" style="border-left: 3px solid var(--muted); background: #fdfdfc; display: ${hasFillerRules ? 'block' : 'none'};">
+                <div class="rule-row-1" style="grid-template-columns: auto 1fr auto;">
+                    <div style="display:flex; align-items:center;">
+                        <span style="font-size:11px; font-weight:800; color:var(--deep); background:#ecefe9; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;" title="Files matching custom rules that have 'Defer to filler' enabled">FILLER</span>
+                    </div>
+                    <div></div>
+                    <span style="font-size:11px; color:var(--muted);" title="Target volumes for rules with 'Defer to filler' enabled. Placed before duplicate and unmatched processing.">Rules deferred to fill remaining space</span>
+                </div>
+                <div class="rule-row-2">
+                    <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Preferred target volumes for filler files when space requires relocation. If preferred volumes are full, all pool volumes will be used. Click volumes or choose '✦ All'.">TARGETS:</span>
+                    <div id="filler-pills" class="rule-pills-container" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                        ${fillerPills}
+                    </div>
+                </div>
+                <div style="margin-top:6px; font-size:11px; color:var(--muted); font-style:italic;">Selected targets are preferred; all pool volumes will be used if preferred volumes are full.</div>
+            </div>
+            `;
+
+            const unmatchedHtml = `
+            <div class="rule-card rule-card-special" style="border-left: 3px solid var(--muted); background: #fdfdfc;">
+                <div class="rule-row-1" style="grid-template-columns: auto 1fr auto;">
+                    <div style="display:flex; align-items:center;">
+                        <span style="font-size:11px; font-weight:800; color:var(--deep); background:#ecefe9; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;" title="Built-in catch-all rule evaluated at the very end">UNMATCHED</span>
+                    </div>
+                    <div></div>
+                    <span style="font-size:11px; color:var(--muted);" title="Unmatched files remain on current volume if space permits, or balance onto emptiest volumes.">Catch-all placement</span>
+                </div>
+                <div class="rule-row-2">
+                    <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Preferred target volumes for unmatched files. If preferred volumes are full, all pool volumes will be used. Click volumes or choose '✦ All'.">TARGETS:</span>
+                    <div id="unmatched-pills" class="rule-pills-container" style="display:inline-flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                        ${defUnmatchedPills}
+                    </div>
+                </div>
+                <div style="margin-top:6px; font-size:11px; color:var(--muted); font-style:italic;">Selected targets are preferred; all pool volumes will be used if preferred volumes are full.</div>
+            </div>
+            `;
+
+            container.innerHTML = userRulesHtml + duplicateHtml + fillerHtml + unmatchedHtml;
+        }
+
+        function toggleAllPill(el) {
+            const container = el.closest('.rule-pills-container');
+            if (!container) return;
+            const volumePills = container.querySelectorAll('.pill:not(.pill-all)');
+
+            if (el.classList.contains('active')) {
+                // Turn OFF '✦ All' -> restore previous selection
+                el.classList.remove('active');
+                volumePills.forEach(p => p.classList.remove('inherited-all'));
+
+                let saved = [];
+                if (container.dataset.savedSelection) {
+                    try {
+                        saved = JSON.parse(container.dataset.savedSelection);
+                    } catch (e) {}
+                    delete container.dataset.savedSelection;
+                }
+
+                const savedSet = new Set(saved);
+                volumePills.forEach(p => {
+                    if (savedSet.has(p.textContent.trim())) {
+                        p.classList.add('active');
+                    } else {
+                        p.classList.remove('active');
+                    }
+                });
+            } else {
+                // Turn ON '✦ All' -> save current selection, show thick green outlines
+                const currentActive = Array.from(volumePills)
+                    .filter(p => p.classList.contains('active'))
+                    .map(p => p.textContent.trim());
+                container.dataset.savedSelection = JSON.stringify(currentActive);
+
+                volumePills.forEach(p => {
+                    p.classList.remove('active');
+                    p.classList.add('inherited-all');
+                });
+                el.classList.add('active');
+            }
         }
 
         function togglePill(el) {
-            el.classList.toggle('active');
+            const container = el.closest('.rule-pills-container');
+            if (!container) {
+                el.classList.toggle('active');
+                return;
+            }
+            const allPill = container.querySelector('.pill-all');
+            if (allPill && allPill.classList.contains('active')) {
+                // Exits '✦ All' mode and activates only this clicked pill
+                allPill.classList.remove('active');
+                delete container.dataset.savedSelection;
+                const volumePills = container.querySelectorAll('.pill:not(.pill-all)');
+                volumePills.forEach(p => {
+                    p.classList.remove('inherited-all');
+                    p.classList.remove('active');
+                });
+                el.classList.add('active');
+            } else {
+                // Normal toggle without touching '✦ All'
+                el.classList.toggle('active');
+            }
         }
 
         function toggleRuleDef(cb) {
@@ -444,11 +617,20 @@
                 row2.classList.remove('hidden');
                 depthContainer.style.display = 'flex';
             }
+            updateFillerCardVisibility();
+        }
+
+        function updateFillerCardVisibility() {
+            const hasFiller = Array.from(document.querySelectorAll('.rule-card:not(.rule-card-special) .r-def')).some(cb => cb.checked);
+            const fillerCard = document.getElementById('rule-card-filler');
+            if (fillerCard) {
+                fillerCard.style.display = hasFiller ? 'block' : 'none';
+            }
         }
 
         function addRule() {
             syncDOMToState();
-            state.config.filePlacementRules.push({ fullRelativePath: '', startingDepth: 1, deferPlacement: false, allowedVolumeAliases: [] });
+            state.config.filePlacementRules.unshift({ fullRelativePath: '', startingDepth: 1, deferToFiller: false, allowedVolumeAliases: [] });
             renderRules();
         }
 
@@ -495,8 +677,8 @@
 
                 for (let i = 0; i < rules.length; i++) {
                     const r = rules[i];
-                    if (!r.deferPlacement && r.allowedVolumeAliases.length === 0) {
-                        throw new Error(`Rule ${i + 1} (Path: '${r.fullRelativePath}') is missing targets. Select at least one volume, or check 'Defer placement'.`);
+                    if (!r.deferToFiller && r.allowedVolumeAliases.length === 0) {
+                        throw new Error(`Rule ${i + 1} (Path: '${r.fullRelativePath}') is missing targets. Select at least one volume, choose '✦ All', or check 'Defer to filler'.`);
                     }
                 }
 
@@ -504,7 +686,10 @@
                     drivePoolMode: document.getElementById('cfg-drivepool').checked,
                     snapshotsFolder: document.getElementById('cfg-snapshot-dir').value.trim(),
                     volumes: state.config.volumes,
-                    filePlacementRules: rules
+                    filePlacementRules: rules,
+                    duplicates: state.config.duplicates,
+                    filler: state.config.filler,
+                    unmatched: state.config.unmatched
                 };
 
                 const res = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
@@ -700,24 +885,35 @@
             const snapName = document.getElementById('plan-snapshot-select').value;
             const btn = document.getElementById('btn-plan-generate');
             const notice = document.getElementById('plan-notice');
+            const subtitle = document.getElementById('plan-subtitle');
+            const results = document.getElementById('plan-results');
 
             if(!snapName) return;
             btn.disabled = true;
-            notice.textContent = "Simulating placement rules...";
-            notice.className = "notice";
+            const originalBtnHtml = btn.innerHTML;
+            btn.innerHTML = `<span class="spinner" style="border-color:#fff; border-top-color:transparent; margin-right:6px;"></span> Generating...`;
+            if (subtitle) subtitle.textContent = "Simulating placement rules...";
+
+            notice.innerHTML = `<span class="spinner"></span> Simulating placement rules and file balancing... This may take a few moments.`;
+            notice.className = "notice info";
+            if (results) results.innerHTML = '';
 
             try {
                 const res = await fetch('/api/plan', { method: 'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ snapshotName: snapName }) });
                 const plan = await res.json();
                 if(!res.ok) throw new Error(plan.error || "Failed to generate plan");
 
-                notice.textContent = "";
+                notice.innerHTML = "";
+                notice.className = "notice";
+                if (subtitle) subtitle.textContent = `Generated: ${new Date().toLocaleTimeString()}`;
                 renderPlan(plan);
             } catch (err) {
                 notice.textContent = err.message;
                 notice.className = "notice error";
+                if (subtitle) subtitle.textContent = "";
             } finally {
                 btn.disabled = false;
+                btn.innerHTML = originalBtnHtml;
             }
         }
 
@@ -943,6 +1139,8 @@
                     pathTitle = 'Duplicate copies of files (such as DrivePool mirrored copies or extra replicas). Preserved in place or balanced onto emptiest volumes.';
                 } else if (item.relativePath === '** Unmatched') {
                     pathTitle = 'Files and folders that did not match any placement rule. Remain on current volume if space permits, or placed on emptiest volumes.';
+                } else if (item.relativePath.includes('[duplicate]')) {
+                    pathTitle = `Duplicate copy of folder: ${item.relativePath}`;
                 } else if (item.relativePath.startsWith('<Pool Root>')) {
                     pathTitle = 'Loose files and folders residing directly at the root of the storage pool.';
                 }

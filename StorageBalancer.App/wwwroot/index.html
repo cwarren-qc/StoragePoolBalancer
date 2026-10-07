@@ -274,6 +274,8 @@
                     pathTitle = 'Duplicate copies of files (such as DrivePool mirrored copies or extra replicas). Preserved in place or balanced onto emptiest volumes.';
                 } else if (item.relativePath === '** Unmatched') {
                     pathTitle = 'Files and folders that did not match any placement rule. Remain on current volume if space permits, or placed on emptiest volumes.';
+                } else if (item.relativePath.includes('[duplicate]')) {
+                    pathTitle = `Duplicate copy of folder: ${item.relativePath}`;
                 } else if (item.relativePath.startsWith('<Pool Root>')) {
                     pathTitle = 'Loose files and folders residing directly at the root of the storage pool.';
                 }

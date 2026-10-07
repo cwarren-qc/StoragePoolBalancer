@@ -12,6 +12,9 @@ public class AppConfig
     public string? SnapshotsFolder { get; set; }
     public List<VolumeConfig> Volumes { get; set; } = new();
     public List<FilePlacementRuleConfig> FilePlacementRules { get; set; } = new();
+    public SpecialRuleConfig Duplicates { get; set; } = new();
+    public SpecialRuleConfig Filler { get; set; } = new();
+    public SpecialRuleConfig Unmatched { get; set; } = new();
 }
 
 public class VolumeConfig
@@ -27,7 +30,13 @@ public class FilePlacementRuleConfig
 {
     public string FullRelativePath { get; set; } = string.Empty;
     public int StartingDepth { get; set; } = 1;
-    public bool DeferPlacement { get; set; }
+    public bool DeferToFiller { get; set; }
+    public List<string> AllowedVolumeAliases { get; set; } = new();
+}
+
+public class SpecialRuleConfig
+{
+    public bool Consolidate { get; set; }
     public List<string> AllowedVolumeAliases { get; set; } = new();
 }
 
@@ -54,6 +63,12 @@ public class ConfigManager
 
         config.Volumes ??= new List<VolumeConfig>();
         config.FilePlacementRules ??= new List<FilePlacementRuleConfig>();
+        config.Duplicates ??= new SpecialRuleConfig();
+        config.Duplicates.AllowedVolumeAliases ??= new List<string>();
+        config.Filler ??= new SpecialRuleConfig();
+        config.Filler.AllowedVolumeAliases ??= new List<string>();
+        config.Unmatched ??= new SpecialRuleConfig();
+        config.Unmatched.AllowedVolumeAliases ??= new List<string>();
 
         foreach (var rule in config.FilePlacementRules)
         {
