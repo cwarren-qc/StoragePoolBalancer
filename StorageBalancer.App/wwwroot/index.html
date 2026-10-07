@@ -60,6 +60,8 @@
         .plan-table th,.plan-table td { padding:8px 12px; border-top:1px solid var(--line); text-align:left; vertical-align:top; }
         .plan-table th { color:var(--muted); font-size:10px; font-weight:750; text-transform:uppercase; white-space:nowrap; user-select:none; }
         .plan-table th:hover { color:var(--ink); }
+        th[title], .stat[title], label[title], .reason-badge[title] { cursor: help; }
+        th[data-sort][title] { cursor: pointer; }
         .plan-table td { overflow-wrap:anywhere; }
         .plan-table th:first-child, .plan-table td:first-child { white-space:nowrap; width:45px; text-align:center; }
         .plan-path { min-width:180px; font-family:Consolas,monospace; }
@@ -90,9 +92,9 @@
             <div class="last-scan" id="last-scan">Loading pool state</div>
         </div>
         <section class="summary" aria-label="Configuration summary">
-            <div class="stat"><div class="stat-value" id="disk-count">-</div><div class="stat-label">Physical disks</div></div>
-            <div class="stat"><div class="stat-value" id="volume-count">-</div><div class="stat-label">Mounted volumes</div></div>
-            <div class="stat"><div class="stat-value" id="pool-mode">-</div><div class="stat-label">Pool mode</div></div>
+            <div class="stat" title="Number of physical storage hard drives detected in the pool"><div class="stat-value" id="disk-count">-</div><div class="stat-label">Physical disks</div></div>
+            <div class="stat" title="Total number of mounted volumes across configured disks"><div class="stat-value" id="volume-count">-</div><div class="stat-label">Mounted volumes</div></div>
+            <div class="stat" title="DrivePool mode determines Root Folder automatically (PoolPart.*, and it's not hidden); Standard mode scans configured volume roots"><div class="stat-value" id="pool-mode">-</div><div class="stat-label">Pool mode</div></div>
         </section>
         <section class="details">
             <div class="detail-label">Configured disks</div><div class="detail-value disk-names" id="disk-names">Loading...</div>
@@ -101,8 +103,8 @@
         </section>
         <div class="config-action"><a class="button" href="/configuration.html">Edit configuration <span aria-hidden="true">&#8599;</span></a></div>
         <section class="scan" aria-label="Start scan">
-            <div class="field"><label for="snapshot-name">Snapshot name <span style="font-weight:400">(optional, defaults to date and time)</span></label><input id="snapshot-name" maxlength="120" placeholder="For example: Initial scan"></div>
-            <button class="button" id="start-scan" type="button">Start scan <span aria-hidden="true">&#8599;</span></button>
+            <div class="field"><label for="snapshot-name" title="Optional custom name for this scan snapshot. Defaults to date and time if empty">Snapshot name <span style="font-weight:400">(optional, defaults to date and time)</span></label><input id="snapshot-name" maxlength="120" placeholder="For example: Initial scan"></div>
+            <button class="button" id="start-scan" type="button" title="Initiate a new inventory scan of all pool volumes">Start scan <span aria-hidden="true">&#8599;</span></button>
         </section>
         <div class="notice" id="notice" role="status" aria-live="polite"></div>
 
@@ -111,8 +113,8 @@
                 <div><h2 id="planning-heading">Placement planning</h2><div class="planning-note">Preview only. No files are moved.</div></div>
             </div>
             <div class="plan-controls">
-                <div class="field"><label for="snapshot-select">Snapshot</label><select id="snapshot-select"><option value="">Loading snapshots...</option></select></div>
-                <button class="button" id="generate-plan" type="button">Generate plan</button>
+                <div class="field"><label for="snapshot-select" title="Select an existing pool inventory snapshot to simulate balancing placement">Snapshot</label><select id="snapshot-select"><option value="">Loading snapshots...</option></select></div>
+                <button class="button" id="generate-plan" type="button" title="Simulate file placement balancing rules against the selected snapshot">Generate plan</button>
             </div>
             <div class="notice" id="plan-notice" role="status" aria-live="polite"></div>
             <div class="plan-results" id="plan-results"></div>
@@ -253,7 +255,8 @@
                      const movedText = `${formatBytes(item.sizeMoved)} <span class="plan-muted">(${pct}%)</span>`;
                      const segments = item.sources.map(src => {
                          const pctSrc = (src.size / item.sizeMoved) * 100;
-                         return `<span class="provenance-segment" style="width:${pctSrc}%; background:${activeVolumeColors.get(src.volumeId) || '#89958f'}" title="${escapeHtml(src.alias)}"></span>`;
+                         const tooltip = `${formatBytes(src.size)} moving from ${escapeHtml(src.alias)}`;
+                         return `<span class="provenance-segment" style="width:${pctSrc}%; background:${activeVolumeColors.get(src.volumeId) || '#89958f'}" title="${tooltip}"></span>`;
                      }).join('');
                      miniBar = `<div style="display:flex; flex-direction:column; gap:4px;">
                                    <span>${movedText}</span>
@@ -261,13 +264,36 @@
                                 </div>`;
                 }
 
+                // Catch-all chunks (e.g. 999998, 999999) display as a dash
+                const isSpecial = item.order >= 999900;
+                const orderText = isSpecial ? '-' : item.order;
+                const orderTitle = isSpecial ? 'Deferred or unassigned catch-all category' : `Evaluated at rule decision order #${item.order}`;
+
+                let pathTitle = `Pool folder: ${item.relativePath}`;
+                if (item.relativePath === '** Duplicate') {
+                    pathTitle = 'Duplicate copies of files (such as DrivePool mirrored copies or extra replicas). Preserved in place or balanced onto emptiest volumes.';
+                } else if (item.relativePath === '** Unmatched') {
+                    pathTitle = 'Files and folders that did not match any placement rule. Remain on current volume if space permits, or placed on emptiest volumes.';
+                } else if (item.relativePath.startsWith('<Pool Root>')) {
+                    pathTitle = 'Loose files and folders residing directly at the root of the storage pool.';
+                }
+
+                const logicDescriptions = {
+                    'Stayed intact': 'All files already reside on allowed target volumes and require no file movement.',
+                    'Moved': 'All files under this path are assigned to move from their source volume to a target volume.',
+                    'Split': 'Files under this path are distributed across multiple allowed target volumes based on depth and available capacity.',
+                    'Consolidated': 'Files dispersed across multiple volumes are gathered onto the primary volume where the majority already resided.',
+                    'Moved/Consolidated': 'Files dispersed across multiple volumes are gathered onto a new single target volume.'
+                };
+                const logicTitle = logicDescriptions[item.logicApplied] || item.logicApplied;
+
                 return `<tr>
-                    <td>${item.order === 999999 ? '-' : item.order}</td>
-                    <td class="plan-path">${escapeHtml(item.relativePath)}</td>
-                    <td><span class="reason-badge">${escapeHtml(item.logicApplied)}</span></td>
+                    <td style="font-variant-numeric:tabular-nums; color:var(--muted);" title="${escapeHtml(orderTitle)}">${orderText}</td>
+                    <td class="plan-path" title="${escapeHtml(pathTitle)}">${escapeHtml(item.relativePath)}</td>
+                    <td><span class="reason-badge" title="${escapeHtml(logicTitle)}">${escapeHtml(item.logicApplied)}</span></td>
                     <td>${targetUi}</td>
-                    <td style="font-variant-numeric:tabular-nums">${formatBytes(item.sizeOnDisk)}</td>
-                    <td style="font-variant-numeric:tabular-nums">${miniBar}</td>
+                    <td style="font-variant-numeric:tabular-nums" title="Total data size on disk: ${formatBytes(item.sizeOnDisk)}">${formatBytes(item.sizeOnDisk)}</td>
+                    <td style="font-variant-numeric:tabular-nums" title="${isMoved ? `${formatBytes(item.sizeMoved)} moved between volumes` : 'No movement required'}">${miniBar}</td>
                 </tr>`;
             }).join('');
 
@@ -302,7 +328,7 @@
                     const percentage = volume.finalSize > 0 ? item.size * 100 / volume.finalSize : 0;
                     return `<span class="provenance-key"><i class="provenance-swatch" style="--source-color:${sourceColor}"></i>${escapeHtml(item.alias)} ${percentage.toFixed(0)}%</span>`;
                 }).join('');
-                return `<div class="volume-card" data-volume-id="${escapeHtml(volume.volumeId)}" style="--volume-color:${color}">
+                return `<div class="volume-card" data-volume-id="${escapeHtml(volume.volumeId)}" style="--volume-color:${color}" title="Volume ${escapeHtml(volume.alias)}: ${formatBytes(volume.finalSize)} projected usage of ${formatBytes(volume.capacity)} capacity">
                     <div class="volume-card-head"><div><div class="volume-alias">${escapeHtml(volume.alias)}</div></div><div class="volume-size"><strong>${formatBytes(volume.finalSize)}</strong><div class="plan-muted">of ${formatBytes(volume.capacity)}</div></div></div>
                     <div class="provenance-bar" aria-label="Content provenance">${segments}</div>
                     <div class="provenance-legend">${legend || '<span class="plan-muted">No planned content</span>'}</div>
@@ -321,7 +347,7 @@
                     <summary id="placements-summary-title">Placements (${plan.placements.length})</summary>
 
                     <div class="plan-filters" style="margin: 4px 0 12px 0;">
-                        <label style="font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;">
+                        <label style="font-size: 13px; display: inline-flex; align-items: center; gap: 6px; cursor: pointer;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement">
                             <input type="checkbox" id="show-stayed-intact"> Show 'Stayed intact' placements
                         </label>
                     </div>
@@ -330,12 +356,12 @@
                         <table class="plan-table">
                             <thead>
                                 <tr>
-                                    <th data-sort="order" style="cursor:pointer">#</th>
-                                    <th data-sort="path" style="cursor:pointer">Path</th>
-                                    <th data-sort="logic" style="cursor:pointer">Logic applied</th>
-                                    <th data-sort="target" style="cursor:pointer">Target volume</th>
-                                    <th data-sort="size" style="cursor:pointer">Total Size</th>
-                                    <th data-sort="moved" style="cursor:pointer">Size Moved</th>
+                                    <th data-sort="order" style="cursor:pointer" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
+                                    <th data-sort="path" style="cursor:pointer" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
+                                    <th data-sort="logic" style="cursor:pointer" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
+                                    <th data-sort="target" style="cursor:pointer" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
+                                    <th data-sort="size" style="cursor:pointer" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
+                                    <th data-sort="moved" style="cursor:pointer" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
                                 </tr>
                             </thead>
                             <tbody id="placement-tbody"></tbody>

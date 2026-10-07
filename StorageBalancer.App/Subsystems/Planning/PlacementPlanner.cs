@@ -10,7 +10,7 @@ namespace StorageBalancer.App.Subsystems.Planning;
 
 public sealed class PlacementPlanner
 {
-    public PlacementPlan CreatePlan(PoolSnapshot snapshot, IReadOnlyList<FilePlacementRuleConfig> rules)
+    public PlacementPlan CreatePlan(PoolSnapshot snapshot, IReadOnlyList<FilePlacementRuleConfig> rules, bool includeFiles = false)
     {
         rules ??= Array.Empty<FilePlacementRuleConfig>();
         if (snapshot.SchemaVersion != 1)
@@ -63,7 +63,8 @@ public sealed class PlacementPlanner
 
         var root = Freeze(virtualRoot, snapshot.AllocationUnitSize, warnings);
         var ctx = new PlanContext(targets);
-        var otherRecord = new MatchRecord("** Other (Deferred duplicates & unmatched)", 999999);
+        var duplicateRecord = new MatchRecord("** Duplicate", 999998);
+        var unmatchedRecord = new MatchRecord("** Unmatched", 999999);
 
         PopulateUnassigned(root, ctx);
 
@@ -73,7 +74,7 @@ public sealed class PlacementPlanner
             if (!rule.DeferPlacement && (rule.AllowedVolumeAliases is null || rule.AllowedVolumeAliases.Count == 0)) continue;
 
             string rulePath = NormalizeRulePath(rule.FullRelativePath);
-            ApplyRuleRecursive(root, rule, rulePath, null, ctx, otherRecord);
+            ApplyRuleRecursive(root, rule, rulePath, null, ctx, duplicateRecord);
 
             if (rule.StartingDepth > 1)
             {
@@ -84,7 +85,7 @@ public sealed class PlacementPlanner
                     if (leftovers.Count > 0)
                     {
                         string chunkName = string.IsNullOrEmpty(ruleFolder.RelativePath) ? "<Pool Root>" : ruleFolder.RelativePath;
-                        AssignOrSplitChunk(leftovers, chunkName, rule, ctx, otherRecord);
+                        AssignOrSplitChunk(leftovers, chunkName, rule, ctx, duplicateRecord);
                     }
                 }
             }
@@ -95,12 +96,13 @@ public sealed class PlacementPlanner
             bool first = true;
             foreach (var copy in kvp.Value)
             {
-                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", otherRecord));
+                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", first ? unmatchedRecord : duplicateRecord));
                 first = false;
             }
         }
         ctx.Unassigned.Clear();
-        ctx.MatchRecords.Add(otherRecord);
+        ctx.MatchRecords.Add(duplicateRecord);
+        ctx.MatchRecords.Add(unmatchedRecord);
 
         ProcessDeferredStayPut(ctx);
         ProcessDeferredEmptiest(ctx);
@@ -141,7 +143,8 @@ public sealed class PlacementPlanner
                     targetsArray,
                     m.TotalSize,
                     m.MovedSize,
-                    movedSourcesArray
+                    movedSourcesArray,
+                    includeFiles ? m.Files.ToImmutableArray() : null
                 );
             })
             .OrderBy(p => p.RelativePath, StringComparer.OrdinalIgnoreCase)
@@ -159,7 +162,7 @@ public sealed class PlacementPlanner
         }
     }
 
-    private static void ApplyRuleRecursive(PlanningFolder folder, FilePlacementRuleConfig rule, string rulePath, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord otherRecord)
+    private static void ApplyRuleRecursive(PlanningFolder folder, FilePlacementRuleConfig rule, string rulePath, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord duplicateRecord)
     {
         var unassignedFiles = GetUnassignedFilesInSubtree(folder, ctx).ToList();
         if (unassignedFiles.Count == 0) return;
@@ -195,7 +198,7 @@ public sealed class PlacementPlanner
 
                 if (currentRecord != null)
                 {
-                    foreach (var file in unassignedFiles) DeferFile(file, currentRecord, otherRecord, ctx);
+                    foreach (var file in unassignedFiles) DeferFile(file, currentRecord, duplicateRecord, ctx);
                 }
                 return;
             }
@@ -204,7 +207,7 @@ public sealed class PlacementPlanner
 
             if (string.IsNullOrEmpty(folder.RelativePath))
             {
-                ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, otherRecord);
+                ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, duplicateRecord);
                 return;
             }
 
@@ -224,22 +227,22 @@ public sealed class PlacementPlanner
 
             if (bestTarget != null)
             {
-                foreach (var file in unassignedFiles) AssignPrimaryCopy(file, bestTarget, currentRecord, otherRecord, ctx);
+                foreach (var file in unassignedFiles) AssignPrimaryCopy(file, bestTarget, currentRecord, duplicateRecord, ctx);
                 return;
             }
 
-            ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, otherRecord);
+            ProcessSplit(folder, rule, allowedTargets, currentRecord, ctx, duplicateRecord);
             return;
         }
 
         if (canReachRule || withinRule)
         {
             foreach (var child in folder.Children.OfType<PlanningFolder>())
-                ApplyRuleRecursive(child, rule, rulePath, inheritedRecord, ctx, otherRecord);
+                ApplyRuleRecursive(child, rule, rulePath, inheritedRecord, ctx, duplicateRecord);
         }
     }
 
-    private static void ProcessSplit(PlanningFolder folder, FilePlacementRuleConfig rule, List<PlanningTarget> allowedTargets, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord otherRecord)
+    private static void ProcessSplit(PlanningFolder folder, FilePlacementRuleConfig rule, List<PlanningTarget> allowedTargets, MatchRecord? inheritedRecord, PlanContext ctx, MatchRecord duplicateRecord)
     {
         var looseFiles = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
 
@@ -268,7 +271,7 @@ public sealed class PlacementPlanner
 
             if (bestTarget != null)
             {
-                foreach (var file in looseFiles) AssignPrimaryCopy(file, bestTarget, looseRecord, otherRecord, ctx);
+                foreach (var file in looseFiles) AssignPrimaryCopy(file, bestTarget, looseRecord, duplicateRecord, ctx);
             }
             else
             {
@@ -280,28 +283,28 @@ public sealed class PlacementPlanner
                         .ThenByDescending(t => t.RemainingSpace)
                         .FirstOrDefault();
 
-                    if (fileTarget != null) AssignPrimaryCopy(file, fileTarget, looseRecord, otherRecord, ctx);
+                    if (fileTarget != null) AssignPrimaryCopy(file, fileTarget, looseRecord, duplicateRecord, ctx);
                     else
                     {
                         ctx.DeferredDueToSpace[looseRecord.Path] = ctx.DeferredDueToSpace.GetValueOrDefault(looseRecord.Path) + file.SizeOnDisk;
-                        DeferFile(file, looseRecord, otherRecord, ctx);
+                        DeferFile(file, looseRecord, duplicateRecord, ctx);
                     }
                 }
             }
         }
 
         foreach (var child in folder.Children.OfType<PlanningFolder>())
-            ApplyRuleRecursive(child, rule, NormalizeRulePath(rule.FullRelativePath), inheritedRecord, ctx, otherRecord);
+            ApplyRuleRecursive(child, rule, NormalizeRulePath(rule.FullRelativePath), inheritedRecord, ctx, duplicateRecord);
     }
 
-    private static void AssignOrSplitChunk(List<PlanningFile> files, string chunkName, FilePlacementRuleConfig rule, PlanContext ctx, MatchRecord otherRecord)
+    private static void AssignOrSplitChunk(List<PlanningFile> files, string chunkName, FilePlacementRuleConfig rule, PlanContext ctx, MatchRecord duplicateRecord)
     {
         var currentRecord = new MatchRecord(chunkName, ctx.DecisionCounter++);
         ctx.MatchRecords.Add(currentRecord);
 
         if (rule.DeferPlacement)
         {
-            foreach (var file in files) DeferFile(file, currentRecord, otherRecord, ctx);
+            foreach (var file in files) DeferFile(file, currentRecord, duplicateRecord, ctx);
             return;
         }
 
@@ -323,7 +326,7 @@ public sealed class PlacementPlanner
 
         if (bestTarget != null)
         {
-            foreach (var file in files) AssignPrimaryCopy(file, bestTarget, currentRecord, otherRecord, ctx);
+            foreach (var file in files) AssignPrimaryCopy(file, bestTarget, currentRecord, duplicateRecord, ctx);
         }
         else
         {
@@ -335,17 +338,17 @@ public sealed class PlacementPlanner
                     .ThenByDescending(t => t.RemainingSpace)
                     .FirstOrDefault();
 
-                if (fileTarget != null) AssignPrimaryCopy(file, fileTarget, currentRecord, otherRecord, ctx);
+                if (fileTarget != null) AssignPrimaryCopy(file, fileTarget, currentRecord, duplicateRecord, ctx);
                 else
                 {
                     ctx.DeferredDueToSpace[currentRecord.Path] = ctx.DeferredDueToSpace.GetValueOrDefault(currentRecord.Path) + file.SizeOnDisk;
-                    DeferFile(file, currentRecord, otherRecord, ctx);
+                    DeferFile(file, currentRecord, duplicateRecord, ctx);
                 }
             }
         }
     }
 
-    private static void AssignPrimaryCopy(PlanningFile file, PlanningTarget target, MatchRecord? record, MatchRecord otherRecord, PlanContext ctx)
+    private static void AssignPrimaryCopy(PlanningFile file, PlanningTarget target, MatchRecord? record, MatchRecord duplicateRecord, PlanContext ctx)
     {
         var copies = ctx.Unassigned[file];
         ctx.Unassigned.Remove(file);
@@ -364,6 +367,17 @@ public sealed class PlacementPlanner
                 record.MovedSize += primaryCopy.SizeOnDisk;
                 record.MovedSources[primaryCopy.VolumeAlias] = record.MovedSources.GetValueOrDefault(primaryCopy.VolumeAlias) + primaryCopy.SizeOnDisk;
             }
+
+            record.Files.Add(new PlannedFileItem(
+                file.Name,
+                file.RelativePath,
+                primaryCopy.VolumeAlias,
+                primaryCopy.MountPoint,
+                primaryCopy.RootFolderPath,
+                primaryCopy.FullPath,
+                target.Alias,
+                primaryCopy.Size,
+                primaryCopy.SizeOnDisk));
         }
 
         if (!ctx.AssignedVolumes.TryGetValue(file, out var set))
@@ -377,11 +391,11 @@ public sealed class PlacementPlanner
         foreach (var copy in copies)
         {
             if (copy == primaryCopy) continue;
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", otherRecord));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", duplicateRecord));
         }
     }
 
-    private static void DeferFile(PlanningFile file, MatchRecord record, MatchRecord otherRecord, PlanContext ctx)
+    private static void DeferFile(PlanningFile file, MatchRecord record, MatchRecord duplicateRecord, PlanContext ctx)
     {
         var copies = ctx.Unassigned[file];
         ctx.Unassigned.Remove(file);
@@ -389,7 +403,7 @@ public sealed class PlacementPlanner
         bool isPrimary = true;
         foreach (var copy in copies)
         {
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Placement", isPrimary ? record : otherRecord));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Placement", isPrimary ? record : duplicateRecord));
             isPrimary = false;
         }
     }
@@ -419,6 +433,17 @@ public sealed class PlacementPlanner
                     def.Record.TotalSize += def.Copy.SizeOnDisk;
                     def.Record.Targets[target.Alias] = def.Record.Targets.GetValueOrDefault(target.Alias) + def.Copy.SizeOnDisk;
                     def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+
+                    def.Record.Files.Add(new PlannedFileItem(
+                        def.File.Name,
+                        def.File.RelativePath,
+                        def.Copy.VolumeAlias,
+                        def.Copy.MountPoint,
+                        def.Copy.RootFolderPath,
+                        def.Copy.FullPath,
+                        target.Alias,
+                        def.Copy.Size,
+                        def.Copy.SizeOnDisk));
                 }
             }
             else
@@ -463,6 +488,17 @@ public sealed class PlacementPlanner
                         def.Record.MovedSize += def.Copy.SizeOnDisk;
                         def.Record.MovedSources[def.Copy.VolumeAlias] = def.Record.MovedSources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
                     }
+
+                    def.Record.Files.Add(new PlannedFileItem(
+                        def.File.Name,
+                        def.File.RelativePath,
+                        def.Copy.VolumeAlias,
+                        def.Copy.MountPoint,
+                        def.Copy.RootFolderPath,
+                        def.Copy.FullPath,
+                        target.Alias,
+                        def.Copy.Size,
+                        def.Copy.SizeOnDisk));
                 }
             }
             else
@@ -480,6 +516,17 @@ public sealed class PlacementPlanner
                 def.Record.TotalSize += def.Copy.SizeOnDisk;
                 def.Record.Targets[def.Copy.VolumeAlias] = def.Record.Targets.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
                 def.Record.Sources[def.Copy.VolumeAlias] = def.Record.Sources.GetValueOrDefault(def.Copy.VolumeAlias) + def.Copy.SizeOnDisk;
+
+                def.Record.Files.Add(new PlannedFileItem(
+                    def.File.Name,
+                    def.File.RelativePath,
+                    def.Copy.VolumeAlias,
+                    def.Copy.MountPoint,
+                    def.Copy.RootFolderPath,
+                    def.Copy.FullPath,
+                    def.Copy.VolumeAlias,
+                    def.Copy.Size,
+                    def.Copy.SizeOnDisk));
             }
         }
     }
@@ -775,6 +822,7 @@ public sealed class PlacementPlanner
         public Dictionary<string, long> Targets { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, long> Sources { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, long> MovedSources { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<PlannedFileItem> Files { get; } = new();
     }
 
     private sealed class PlanningTarget(

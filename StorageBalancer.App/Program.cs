@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using System.Text.Json;
 using StorageBalancer.App.Subsystems.Storage;
@@ -175,7 +175,7 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
         if (snapshot is null)
             return Results.NotFound(new { Error = "The selected snapshot was not found." });
 
-        return Results.Ok(planner.CreatePlan(snapshot, config.FilePlacementRules));
+        return Results.Ok(planner.CreatePlan(snapshot, config.FilePlacementRules, request?.IncludeFiles ?? false));
     }
     catch (InvalidDataException exception)
     {
@@ -203,5 +203,5 @@ static string ResolveSnapshotsFolder(AppConfig config, IWebHostEnvironment envir
 app.Run(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:5000");
 
 public record ScanStartRequest(string? SnapshotName);
-public record PlanRequest(string? SnapshotName);
+public record PlanRequest(string? SnapshotName, bool IncludeFiles = false);
 public record SnapshotListEntry(string Name, DateTime LastModifiedUtc, long Length);

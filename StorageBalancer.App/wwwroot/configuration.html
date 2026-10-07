@@ -93,6 +93,7 @@
         body.is-dragging .rule-card * { pointer-events: none; }
 
         /* Simulation Table Extras */
+        th[title], .field-header[title], label[title], .reason-badge[title] { cursor: help; }
         .sortable { cursor: pointer; user-select: none; }
         .sortable:hover { color: var(--ink) !important; }
         .util-bar-bg { flex: 1; background: var(--line); height: 6px; border-radius: 3px; overflow: hidden; max-width: 150px; }
@@ -127,7 +128,7 @@
 
     <main class="shell">
         <!-- CONFIGURATION -->
-        <details id="details-config" open>
+        <details id="details-config">
             <summary>
                 <div class="summary-title">⚙️ Configuration</div>
                 <button class="btn primary" id="btn-save-config" onclick="event.preventDefault(); saveConfig();">Save Configuration</button>
@@ -138,12 +139,12 @@
                 <div class="toolbar" style="margin-bottom:24px;">
                     <div style="display:flex; gap:16px; width:100%;">
                         <div class="field" style="flex:1;">
-                            <div class="field-header">Snapshots Folder</div>
+                            <div class="field-header" title="Folder directory where storage pool scan snapshots (.json) are stored and loaded">Snapshots Folder</div>
                             <input type="text" id="cfg-snapshot-dir" placeholder="E:\Snapshots">
                         </div>
                         <div class="field" style="display:flex; align-items:center; gap:8px; margin-top:16px;">
                             <input type="checkbox" id="cfg-drivepool" style="width:16px;">
-                            <label for="cfg-drivepool" style="font-size:13px; font-weight:600; cursor:pointer;">DrivePool Mode</label>
+                            <label for="cfg-drivepool" style="font-size:13px; font-weight:600; cursor:pointer;" title="DrivePool mode: When enabled, the Root Folder will be determined automatically (e.g. 'PoolPart.*').">DrivePool Mode</label>
                         </div>
                     </div>
                 </div>
@@ -151,16 +152,16 @@
                 <!-- VOLUMES SUB-SECTION -->
                 <details class="sub-details" open>
                     <summary>
-                        <span>Volumes</span>
-                        <button class="btn" onclick="event.preventDefault(); addVolume()">+ Add Volume</button>
+                        <span title="Physical or logical volumes participating in the storage pool">Volumes</span>
+                        <button class="btn" onclick="event.preventDefault(); addVolume()" title="Add a new volume to the pool configuration">+ Add Volume</button>
                     </summary>
                     <div class="sub-content">
                         <div class="vol-headers" id="vol-headers">
-                            <div class="field-header">Alias</div>
-                            <div class="field-header">Mount Point</div>
-                            <div class="field-header root-header">Root Folder</div>
-                            <div class="field-header">Capacity</div>
-                            <div class="field-header">Physical Disk</div>
+                            <div class="field-header" title="Short identifier for the volume (e.g. M01) used in rules and balancing reports">Alias</div>
+                            <div class="field-header" title="Local drive letter or directory path where the volume is mounted (e.g. R:\ or C:\Mount\Vol1)">Mount Point</div>
+                            <div class="field-header" title="Total usable storage capacity of the volume in GiB">Capacity</div>
+                            <div class="field-header" title="Used only to limit to one action at a times on volumes sharing the same physical disk">Physical Disk</div>
+                            <div class="field-header root-header" title="Relative folder path inside the mount point where pool content begins (leave blank if at volume root).">Root Folder</div>
                             <div></div>
                         </div>
                         <div id="volumes-container"></div>
@@ -170,8 +171,8 @@
                 <!-- RULES SUB-SECTION -->
                 <details class="sub-details" open>
                     <summary>
-                        <span>Balancing Rules</span>
-                        <button class="btn" onclick="event.preventDefault(); addRule()">+ Add Rule</button>
+                        <span title="Balancing rules defining where specific folders in the pool are stored. Evaluated from top to bottom.">Balancing Rules</span>
+                        <button class="btn" onclick="event.preventDefault(); addRule()" title="Create a new file placement rule to control folder placement">+ Add Rule</button>
                     </summary>
                     <div class="sub-content">
                         <div id="rules-container"></div>
@@ -184,27 +185,27 @@
         <!-- STATE SCANNER -->
         <details id="details-scan">
             <summary>
-                <div class="summary-title">🔍 State Scanner <span class="summary-subtitle" id="scan-subtitle">Ready</span></div>
+                <div class="summary-title">🔍 State Scanner <span class="summary-subtitle" id="scan-subtitle"></span></div>
             </summary>
             <div class="content">
                 <div class="toolbar">
                     <div class="field" style="width:300px;">
-                        <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)">
+                        <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)" title="Optional custom name for this scan snapshot. Defaults to date and time if empty">
                     </div>
                     <div style="display:flex; gap:8px;">
-                        <button class="btn danger" id="btn-scan-cancel" onclick="cancelScan()" hidden>Cancel Scan</button>
-                        <button class="btn primary" id="btn-scan-start" onclick="startScan()">Start Pool Scan</button>
+                        <button class="btn danger" id="btn-scan-cancel" onclick="cancelScan()" hidden title="Cancel the currently running pool scan">Cancel Scan</button>
+                        <button class="btn primary" id="btn-scan-start" onclick="startScan()" title="Start scanning all configured volumes to catalog files, folders, and sizes">Start Pool Scan</button>
                     </div>
                 </div>
                 <table class="scan-table">
                 <thead>
                         <tr>
-                            <th style="width: 70px;">Volume</th>
-                            <th style="width: 120px;">State</th>
-                            <th style="width: 80px; text-align:right;">Files</th>
-                            <th style="width: 80px; text-align:right;">Folders</th>
-                            <th style="width: 100px; text-align:right;">Logical Data</th>
-                            <th style="width: auto; padding-left: 16px;">Current Path</th>
+                            <th style="width: 70px;" title="Volume alias being scanned">Volume</th>
+                            <th style="width: 120px;" title="Current scan status: Scanning, Waiting, Queued, Ready, or Complete">State</th>
+                            <th style="width: 80px; text-align:right;" title="Total number of files cataloged on this volume">Files</th>
+                            <th style="width: 80px; text-align:right;" title="Total number of directories cataloged on this volume">Folders</th>
+                            <th style="width: 100px; text-align:right;" title="Total logical file size scanned on this volume">Logical Data</th>
+                            <th style="width: auto; padding-left: 16px;" title="Folder path currently being scanned on disk">Current Path</th>
                         </tr>
                     </thead>
                         <tbody id="scan-tbody">
@@ -404,22 +405,22 @@
                      ondragleave="handleDragLeave(event)" ondrop="handleDrop(event, ${i})" ondragend="handleDragEnd(event)">
                     <div class="rule-row-1">
                         <div style="display:flex; gap:2px; padding-right:8px; border-right:1px solid var(--line); align-items:center;">
-                            <div class="drag-handle" title="Drag to reorder">⋮⋮</div>
-                            <button class="move-btn" onclick="moveRule(${i}, 'up')" title="Move Up">↑</button>
-                            <button class="move-btn" onclick="moveRule(${i}, 'down')" title="Move Down">↓</button>
+                            <div class="drag-handle" title="Drag to reorder rule priority (rules are evaluated top-to-bottom)">⋮⋮</div>
+                            <button class="move-btn" onclick="moveRule(${i}, 'up')" title="Move rule up (evaluated earlier)">↑</button>
+                            <button class="move-btn" onclick="moveRule(${i}, 'down')" title="Move rule down (evaluated later)">↓</button>
                         </div>
-                        <div class="field"><input type="text" class="r-path" value="${escapeHtml(r.fullRelativePath)}" placeholder="Path (e.g. Movies)"></div>
-                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;">
+                        <div class="field"><input type="text" class="r-path" value="${escapeHtml(r.fullRelativePath)}" placeholder="Path (e.g. Movies)" title="Root-relative folder path in the pool to balance (e.g. Movies, Backups, or leave blank for entire pool)"></div>
+                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;" title="When checked, files in this path are not assigned immediately to dedicated target volumes. They'll be assigned after all the other rules are processed, remaining on their current drive if space allows, or balance onto emptiest drives if needed.">
                             <input type="checkbox" class="r-def" ${isDef?'checked':''} onchange="toggleRuleDef(this)"> Defer placement
                         </label>
-                        <div class="field r-depth-container" style="display:${isDef ? 'none' : 'flex'}; align-items:center; gap:6px;">
+                        <div class="field r-depth-container" style="display:${isDef ? 'none' : 'flex'}; align-items:center; gap:6px;" title="Starting Depth: Folder nesting level at which rules apply. Depth 1 balances this entire folder as a single unit onto one volume. Depth 2 splits and balances immediate subfolders independently across target volumes. Higher depths balance deeper subfolders.">
                             <span style="font-size:12px; color:var(--muted);">Depth:</span>
                             <input type="number" class="r-depth" min="1" value="${r.startingDepth}" style="width:60px;">
                         </div>
                         <button class="remove-btn" onclick="if(confirm('Are you sure you want to delete this rule?')) removeRule(${i})" title="Remove Rule">×</button>
                     </div>
                     <div class="rule-row-2 ${isDef?'hidden':''}">
-                        <span style="font-size:11px; color:var(--muted); margin-right:8px;">TARGETS:</span>
+                        <span style="font-size:11px; color:var(--muted); margin-right:8px;" title="Allowed target volumes where files matching this rule may be placed. Click volumes to toggle allowed targets.">TARGETS:</span>
                         ${pills || '<span style="font-size:11px; color:var(--muted);">Add a volume first</span>'}
                     </div>
                 </div>
@@ -558,7 +559,7 @@
                 state.scanPolling = false;
                 loadSnapshots();
             } else {
-                document.getElementById('scan-subtitle').textContent = "Ready";
+                document.getElementById('scan-subtitle').textContent = "";
             }
 
             const tbody = document.getElementById('scan-tbody');
@@ -732,12 +733,6 @@
             let html = `
                 <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px;">
                     <span style="font-size:15px;"><strong>${formatBytes(totalMoved)}</strong> to transfer</span>
-                    <div style="display:flex; align-items:center; gap:16px;">
-                        <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer;">
-                            <input type="checkbox" id="cb-stayed-intact" ${showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
-                        </label>
-                        <span style="font-size:12px; color:var(--muted);">Snapshot: ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
-                    </div>
                 </div>
             `;
 
@@ -752,11 +747,11 @@
                     <table class="scan-table">
                         <thead>
                             <tr>
-                                <th style="width: 8%;">Volume</th>
-                                <th style="width: 8%; text-align:right;">Final Size</th>
-                                <th style="width: 8%; text-align:right;">Capacity</th>
-                                <th style="width: 8%; text-align:right;">% Util</th>
-                                <th style="padding-left: 20px;">Content Source</th>
+                                <th style="width: 10%;" title="Configured volume alias">Volume</th>
+                                <th style="width: 12%; text-align:right;" title="Projected total size on disk after balancing moves and placements">Final Size</th>
+                                <th style="width: 12%; text-align:right;" title="Total usable storage capacity of this volume">Capacity</th>
+                                <th style="width: 8%; text-align:right;" title="Projected percentage of capacity utilized after balancing">% Util</th>
+                                <th style="width: 58%; padding-left: 20px;" title="Color-coded distribution of where data on this volume originates from. Hover over segments for source details">Content Provenance</th>
                             </tr>
                         </thead>
                         <tbody id="volume-tbody"></tbody>
@@ -764,16 +759,22 @@
                 </div>
 
                 <!-- PLACEMENTS TABLE -->
-                <h3 style="margin: 0 0 8px; font-size: 14px;">Path Placements</h3>
+                <div style="display:flex; justify-content:space-between; align-items:end; margin: 0 0 8px;">
+                    <h3 style="margin: 0; font-size: 14px;">Path Placements</h3>
+                    <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement">
+                        <input type="checkbox" id="cb-stayed-intact" ${showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
+                    </label>
+                </div>
                 <div style="margin-bottom: 24px; overflow-x:auto;">
                     <table class="plan-table" id="placement-table">
                         <thead>
                             <tr>
-                                <th class="sortable" data-sort="path" style="">Path</th>
-                                <th class="sortable" data-sort="logic" style="width: 12%;">Logic applied</th>
-                                <th class="sortable" data-sort="target" style="width: 15%;">Target volume</th>
-                                <th class="sortable" data-sort="size" style="width: 8%; text-align:right;">Total Size</th>
-                                <th class="sortable" data-sort="moved" style="width: 15%; text-align:right;">Size Moved</th>
+                                <th class="sortable" data-sort="order" style="width: 5%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
+                                <th class="sortable" data-sort="path" style="width: 43%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
+                                <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
+                                <th class="sortable" data-sort="target" style="width: 15%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
+                                <th class="sortable" data-sort="size" style="width: 10%; text-align:right;" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
+                                <th class="sortable" data-sort="moved" style="width: 15%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
                             </tr>
                         </thead>
                         <tbody id="placement-tbody"></tbody>
@@ -823,7 +824,7 @@
 
                     const tooltip = item.alias === volume.alias
                         ? `${formatBytes(item.size)} stays on ${escapeHtml(volume.alias)}`
-                        : `${formatBytes(item.size)} from ${escapeHtml(item.alias)} will be moved here`;
+                        : `${formatBytes(item.size)} from ${escapeHtml(item.alias)} moved here`;
 
                     return `<span class="provenance-segment" style="width:${percentage}%;background:${sourceColor}" title="${tooltip}"></span>`;
                 }).join('');
@@ -864,6 +865,7 @@
             filtered.sort((a,b) => {
                 let valA, valB;
                 switch(placementSortCol) {
+                    case 'order': valA = a.order; valB = b.order; break;
                     case 'path': valA = a.relativePath.toLowerCase(); valB = b.relativePath.toLowerCase(); break;
                     case 'logic': valA = a.logicApplied.toLowerCase(); valB = b.logicApplied.toLowerCase(); break;
                     case 'target': valA = a.targets.length > 0 ? a.targets[0].alias : ''; valB = b.targets.length > 0 ? b.targets[0].alias : ''; break;
@@ -888,7 +890,7 @@
             });
 
             if (filtered.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="5" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check 'Show Stayed intact' to see unchanged paths.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="6" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check 'Show Stayed intact' to see unchanged paths.</td></tr>`;
                 return;
             }
 
@@ -931,13 +933,37 @@
                                 </div>`;
                 }
 
+                // Catch-all chunks (e.g. 999998, 999999) display as a dash
+                const isSpecial = item.order >= 999900;
+                const orderText = isSpecial ? '-' : item.order;
+                const orderTitle = isSpecial ? 'Deferred or unassigned catch-all category' : `Evaluated at rule decision order #${item.order}`;
+
+                let pathTitle = `Pool folder: ${item.relativePath}`;
+                if (item.relativePath === '** Duplicate') {
+                    pathTitle = 'Duplicate copies of files (such as DrivePool mirrored copies or extra replicas). Preserved in place or balanced onto emptiest volumes.';
+                } else if (item.relativePath === '** Unmatched') {
+                    pathTitle = 'Files and folders that did not match any placement rule. Remain on current volume if space permits, or placed on emptiest volumes.';
+                } else if (item.relativePath.startsWith('<Pool Root>')) {
+                    pathTitle = 'Loose files and folders residing directly at the root of the storage pool.';
+                }
+
+                const logicDescriptions = {
+                    'Stayed intact': 'All files already reside on allowed target volumes and require no file movement.',
+                    'Moved': 'All files under this path are assigned to move from their source volume to a target volume.',
+                    'Split': 'Files under this path are distributed across multiple allowed target volumes based on depth and available capacity.',
+                    'Consolidated': 'Files dispersed across multiple volumes are gathered onto the primary volume where the majority already resided.',
+                    'Moved/Consolidated': 'Files dispersed across multiple volumes are gathered onto a new single target volume.'
+                };
+                const logicTitle = logicDescriptions[item.logicApplied] || item.logicApplied;
+
                 return `
                     <tr>
-                        <td style="font-family:monospace; font-size:11px; overflow-wrap:anywhere;">${escapeHtml(item.relativePath)}</td>
-                        <td><span class="reason-badge">${escapeHtml(item.logicApplied)}</span></td>
+                        <td style="font-variant-numeric:tabular-nums; color:var(--muted);" title="${escapeHtml(orderTitle)}">${orderText}</td>
+                        <td style="font-family:monospace; font-size:11px; overflow-wrap:anywhere;" title="${escapeHtml(pathTitle)}">${escapeHtml(item.relativePath)}</td>
+                        <td><span class="reason-badge" title="${escapeHtml(logicTitle)}">${escapeHtml(item.logicApplied)}</span></td>
                         <td>${targetUi}</td>
-                        <td style="text-align:right; font-variant-numeric:tabular-nums">${formatBytes(item.sizeOnDisk)}</td>
-                        <td style="text-align:right;">${miniBar}</td>
+                        <td style="text-align:right; font-variant-numeric:tabular-nums" title="Total data size on disk: ${formatBytes(item.sizeOnDisk)}">${formatBytes(item.sizeOnDisk)}</td>
+                        <td style="text-align:right;" title="${isMoved ? `${formatBytes(item.sizeMoved)} moved between volumes` : 'No movement required'}">${miniBar}</td>
                     </tr>
                 `;
             }).join('');

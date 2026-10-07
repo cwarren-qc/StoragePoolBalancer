@@ -42,6 +42,18 @@ public sealed record PlanningFolderCopy(
     long SizeOnDisk
 );
 
+public sealed record PlannedFileItem(
+    string Name,
+    string RelativePath,
+    string OriginalVolumeAlias,
+    string OriginalMountPoint,
+    string OriginalRootFolderPath,
+    string OriginalFullPath,
+    string DestinationVolumeAlias,
+    long Size,
+    long SizeOnDisk
+);
+
 public sealed record PlannedPlacement(
     int Order,
     string RelativePath,
@@ -49,7 +61,9 @@ public sealed record PlannedPlacement(
     ImmutableArray<VolumeProvenance> Targets,
     long SizeOnDisk,
     long SizeMoved,
-    ImmutableArray<VolumeProvenance> Sources
+    ImmutableArray<VolumeProvenance> Sources,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    ImmutableArray<PlannedFileItem>? Files = null
 );
 
 public sealed record VolumeProvenance(string Alias, long Size);
