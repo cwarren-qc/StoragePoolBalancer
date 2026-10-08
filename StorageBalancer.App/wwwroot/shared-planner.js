@@ -112,7 +112,7 @@ window.Balancer.plan = {
                             <tr>
                                 <th style="width: 75px;" title="Configured volume alias">Volume</th>
                                 <th style="width: 85px; text-align:right;" title="Total usable storage capacity of this volume">Capacity</th>
-                                <th style="width: auto; padding-left: 12px; padding-right: 12px;" title="Two proportional capacity bars: START (-OUT) shows current files and outgoing moves; END (+IN) shows target files and incoming moves. Free space exceeding 30% has a cut break.">Capacity & Distribution (Start vs End)</th>
+                                <th style="width: auto; padding-left: 12px; padding-right: 12px;" title="Two proportional capacity bars: START (-OUT) shows current files and outgoing moves; END (+IN) shows target files and incoming moves. Free space exceeding 30% has a cut break.">Distribution (Start vs End)</th>
                                 <th style="width: 85px; text-align:right;" title="Top: Initial used size before balancing. Bottom: Final projected size after balancing.">Used Size</th>
                                 <th style="width: 60px; text-align:right;" title="Top: Initial % capacity used. Bottom: Final % capacity used.">% Util</th>
                                 <th style="width: 95px; text-align:right;" title="Top: Outgoing data moving to other volumes (-OUT). Bottom: Incoming data moving from other volumes (+IN).">Data Moving</th>
@@ -136,12 +136,13 @@ window.Balancer.plan = {
                     <table class="plan-table" id="placement-table">
                         <thead>
                             <tr>
-                                <th class="sortable" data-sort="order" style="width: 5%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
-                                <th class="sortable" data-sort="path" style="width: 43%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
+                                <th class="sortable" data-sort="order" style="width: 4%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
+                                <th class="sortable" data-sort="path" style="width: 38%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
                                 <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
-                                <th class="sortable" data-sort="target" style="width: 15%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
+                                <th class="sortable" data-sort="target" style="width: 12%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
                                 <th class="sortable" data-sort="size" style="width: 10%; text-align:right;" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
-                                <th class="sortable" data-sort="moved" style="width: 15%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
+                                <th class="sortable" data-sort="moved" style="width: 11%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
+                                <th style="width: 13%; text-align:left;" title="Visual distribution showing folder data sources. Leftmost segment shows data staying on the target volume; other segments show incoming moves from source volumes.">Distribution</th>
                             </tr>
                         </thead>
                         <tbody class="plan-placement-tbody"></tbody>
@@ -232,7 +233,7 @@ window.Balancer.plan = {
                     const cutTitle = barIsCut
                         ? `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity - cut representation)`
                         : `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity)`;
-                    
+
                     const cutBreak = barIsCut ? '<span class="break-indicator" title="Scale cut break: Free space exceeds 30%"></span>' : '';
                     freeElement = `<div class="free-segment ${cutClass}" style="width:${visualFreePct}%;" title="${escapeHtml(cutTitle)}">${cutBreak}</div>`;
                 }
@@ -440,7 +441,7 @@ window.Balancer.plan = {
             });
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check \'Show Stayed intact\' to see unchanged paths.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check \'Show Stayed intact\' to see unchanged paths.</td></tr>';
                 return;
             }
 
@@ -455,7 +456,7 @@ window.Balancer.plan = {
                     const targetColor = state.volumeColors.get(item.targets[0].alias) || '#89958f';
                     const segments = item.targets.map(t => {
                         const pct = (t.size / item.sizeOnDisk) * 100;
-                        const tooltip = `${formatBytes(t.size)} going to ${escapeHtml(t.alias)}`;
+                        const tooltip = `${escapeHtml(t.alias)}: ${formatBytes(t.size)} (${pct.toFixed(1)}%)`;
                         return `<span class="provenance-segment" style="width:${pct}%; background:${state.volumeColors.get(t.alias) || '#89958f'}" title="${tooltip}"></span>`;
                     }).join('');
                     targetUi = `<div style="display:flex; flex-direction:column; gap:4px;">
@@ -468,19 +469,51 @@ window.Balancer.plan = {
                     targetUi = `<span class="target-col"><i class="transfer-swatch" style="--source-color:${c}"></i>${escapeHtml(t.alias)}</span>`;
                 }
 
-                let miniBar = '<span class="plan-muted">-</span>';
+                let sizeMovedUi = '<span class="plan-muted">-</span>';
                 if (isMoved) {
                     const pct = ((item.sizeMoved / item.sizeOnDisk) * 100).toFixed(1);
-                    const movedText = `${formatBytes(item.sizeMoved)} <span class="plan-muted">(${pct}%)</span>`;
-                    const segments = item.sources.map(src => {
-                        const pctSrc = (src.size / item.sizeMoved) * 100;
-                        const tooltip = `${formatBytes(src.size)} moving from ${escapeHtml(src.alias)}`;
-                        return `<span class="provenance-segment" style="width:${pctSrc}%; background:${state.volumeColors.get(src.alias) || '#89958f'}" title="${tooltip}"></span>`;
-                    }).join('');
-                    miniBar = `<div style="display:flex; flex-direction:column; gap:4px;">
-                                  <span style="font-variant-numeric:tabular-nums;">${movedText}</span>
-                                  <div class="provenance-bar" style="height:6px; margin:0; width:100px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments}</div>
-                               </div>`;
+                    sizeMovedUi = `<div style="display:flex; flex-direction:column; align-items:flex-end; gap:2px; line-height:1.2;">
+                                      <span style="font-variant-numeric:tabular-nums; white-space:nowrap;">${formatBytes(item.sizeMoved)}</span>
+                                      <span style="font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; line-height:1;">(${pct}%)</span>
+                                   </div>`;
+                }
+
+                let distributionUi = '<span class="plan-muted">-</span>';
+                if (item.sizeOnDisk > 0 && item.sources && item.sources.length > 0) {
+                    let displaySources = item.sources.slice();
+                    if (item.targets && item.targets.length === 1) {
+                        const targetAlias = item.targets[0].alias.toLowerCase();
+                        displaySources.sort((a, b) => {
+                            const aIsTarget = a.alias.toLowerCase() === targetAlias;
+                            const bIsTarget = b.alias.toLowerCase() === targetAlias;
+                            if (aIsTarget && !bIsTarget) return -1;
+                            if (!aIsTarget && bIsTarget) return 1;
+                            return b.size - a.size;
+                        });
+                    } else {
+                        displaySources.sort((a, b) => b.size - a.size);
+                    }
+
+                    const segments = displaySources.map(src => {
+                        const pct = (src.size / item.sizeOnDisk) * 100;
+                        const srcColor = state.volumeColors.get(src.alias) || '#89958f';
+                        let tooltip = '';
+                        if (item.targets && item.targets.length === 1) {
+                            const targetAlias = item.targets[0].alias;
+                            if (src.alias.toLowerCase() === targetAlias.toLowerCase()) {
+                                tooltip = `${escapeHtml(src.alias)} (Stayed in place): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
+                            } else {
+                                tooltip = `${escapeHtml(src.alias)} (Moving to ${escapeHtml(targetAlias)}): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
+                            }
+                        } else {
+                            tooltip = `${escapeHtml(src.alias)}: ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
+                        }
+                        return `<span class="provenance-segment" style="width:${pct}%; min-width:3px; background:${srcColor};" title="${tooltip}"></span>`;
+                    });
+
+                    if (segments.length > 0) {
+                        distributionUi = `<div class="provenance-bar" style="height:7px; margin:4px 0 0 0; width:120px; padding:0; background:#e9eee3; border-radius:3px; display:flex; overflow:hidden;">${segments.join('')}</div>`;
+                    }
                 }
 
                 const orderText = item.order > 0 ? item.order : '-';
@@ -513,7 +546,8 @@ window.Balancer.plan = {
                         <td><span class="reason-badge" title="${escapeHtml(logicTitle)}">${escapeHtml(item.logicApplied)}</span></td>
                         <td>${targetUi}</td>
                         <td style="text-align:right; font-variant-numeric:tabular-nums" title="Total data size on disk: ${formatBytes(item.sizeOnDisk)}">${formatBytes(item.sizeOnDisk)}</td>
-                        <td style="text-align:right;" title="${isMoved ? `${formatBytes(item.sizeMoved)} moved between volumes` : 'No movement required'}">${miniBar}</td>
+                        <td style="text-align:right;" title="${isMoved ? `${formatBytes(item.sizeMoved)} moved between volumes` : 'No movement required'}">${sizeMovedUi}</td>
+                        <td style="text-align:left;">${distributionUi}</td>
                     </tr>
                 `;
             }).join('');

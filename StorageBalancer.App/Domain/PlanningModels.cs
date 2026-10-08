@@ -63,7 +63,8 @@ public sealed record PlannedPlacement(
     long SizeMoved,
     ImmutableArray<VolumeProvenance> Sources,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
-    ImmutableArray<PlannedFileItem>? Files = null
+    ImmutableArray<PlannedFileItem>? Files = null,
+    ImmutableArray<VolumeProvenance>? MovedSources = null
 );
 
 public sealed record VolumeProvenance(string Alias, long Size);

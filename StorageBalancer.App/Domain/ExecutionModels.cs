@@ -48,7 +48,9 @@ public record FileMoveTask(
     string SourceDisk,
     string TargetDisk,
     long Size,
-    long SizeOnDisk
+    long SizeOnDisk,
+    string SourceFilePath = "",
+    string TargetFilePath = ""
 );
 
 public record ActiveTransferInfo(

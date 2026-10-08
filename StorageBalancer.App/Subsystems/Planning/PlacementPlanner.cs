@@ -201,6 +201,9 @@ public sealed class PlacementPlanner
                 var targetsArray = m.Targets.Select(kvp => new VolumeProvenance(kvp.Key, kvp.Value))
                     .OrderByDescending(x => x.Size).ToImmutableArray();
 
+                var sourcesArray = m.Sources.Select(kvp => new VolumeProvenance(kvp.Key, kvp.Value))
+                    .OrderByDescending(x => x.Size).ToImmutableArray();
+
                 var movedSourcesArray = m.MovedSources.Select(kvp => new VolumeProvenance(kvp.Key, kvp.Value))
                     .OrderByDescending(x => x.Size).ToImmutableArray();
 
@@ -211,8 +214,9 @@ public sealed class PlacementPlanner
                     targetsArray,
                     m.TotalSize,
                     m.MovedSize,
-                    movedSourcesArray,
-                    includeFiles ? m.Files.ToImmutableArray() : null
+                    sourcesArray,
+                    includeFiles ? m.Files.ToImmutableArray() : null,
+                    movedSourcesArray
                 );
             })
             .OrderBy(p => p.RelativePath, StringComparer.OrdinalIgnoreCase)

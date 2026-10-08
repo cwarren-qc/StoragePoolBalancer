@@ -181,7 +181,7 @@ details[open] summary { border-bottom-color: var(--line); }
 .transfer-swatch { width: 9px; height: 9px; flex: none; background: var(--source-color); border-radius: 2px; display: inline-block; }
 
 .provenance-bar { display: flex; height: 19px; margin: 6px 13px 8px; overflow: hidden; background: #e4e8e1; border-radius: 3px; }
-.provenance-segment { min-width: 1px; height: 100%; }
+.provenance-segment { min-width: 3px; height: 100%; }
 
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: var(--ink) !important; }

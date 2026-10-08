@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -30,8 +31,6 @@ public class PlanExecutor
     private long _transferredBytes;
     private long _totalFiles;
     private long _transferredFiles;
-    private double _throughputBps;
-    private int _activeWorkers;
     private string _phase = "Idle";
     private FolderCleanupSummary? _folderCleanup;
     private ImmutableList<FolderCleanupAction> _allFolderCleanupActions = ImmutableList<FolderCleanupAction>.Empty;
@@ -78,8 +77,8 @@ public class PlanExecutor
                 _totalBytes,
                 _transferredFiles,
                 _totalFiles,
-                _throughputBps,
-                _activeWorkers,
+                _isRunning ? _activeTransfers.Values.Sum(a => a.ThroughputBps) : 0,
+                _isRunning ? _activeTransfers.Count : 0,
                 _error,
                 volumes,
                 activeTransfers,
@@ -150,8 +149,6 @@ public class PlanExecutor
 
             _transferredBytes = 0;
             _transferredFiles = 0;
-            _throughputBps = 0;
-            _activeWorkers = 0;
             _volumeStates.Clear();
             _activeTransfers.Clear();
 
@@ -207,7 +204,6 @@ public class PlanExecutor
                     lock (_stateLock)
                     {
                         _isRunning = false;
-                        _activeWorkers = 0;
                         _activeTransfers.Clear();
                         if (_completedAt == null) _completedAt = DateTime.UtcNow;
                     }
@@ -309,6 +305,23 @@ public class PlanExecutor
 
         var diskMap = config.Volumes.ToDictionary(v => v.Alias, v => string.IsNullOrWhiteSpace(v.Disk) ? v.Alias : v.Disk, StringComparer.OrdinalIgnoreCase);
 
+        var volumeRootMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var v in snapshot.Volumes)
+        {
+            if (!string.IsNullOrWhiteSpace(v.RootFolderPath))
+            {
+                volumeRootMap[v.Alias] = v.RootFolderPath;
+            }
+        }
+        foreach (var vc in config.Volumes)
+        {
+            if (!volumeRootMap.ContainsKey(vc.Alias))
+            {
+                string root = Path.Combine(vc.MountPoint ?? "", vc.RootFolderRelativePath ?? "");
+                volumeRootMap[vc.Alias] = root;
+            }
+        }
+
         var moveItems = new List<FileMoveTask>();
         foreach (var placement in plan.Placements)
         {
@@ -319,6 +332,11 @@ public class PlanExecutor
                 {
                     string srcDisk = diskMap.GetValueOrDefault(f.OriginalVolumeAlias, f.OriginalVolumeAlias);
                     string tgtDisk = diskMap.GetValueOrDefault(f.DestinationVolumeAlias, f.DestinationVolumeAlias);
+                    string srcRoot = volumeRootMap.GetValueOrDefault(f.OriginalVolumeAlias, "");
+                    string tgtRoot = volumeRootMap.GetValueOrDefault(f.DestinationVolumeAlias, "");
+                    string srcPath = !string.IsNullOrEmpty(srcRoot) ? Path.Combine(srcRoot, f.RelativePath, f.Name) : "";
+                    string tgtPath = !string.IsNullOrEmpty(tgtRoot) ? Path.Combine(tgtRoot, f.RelativePath, f.Name) : "";
+
                     moveItems.Add(new FileMoveTask(
                         f.Name,
                         f.RelativePath,
@@ -327,7 +345,9 @@ public class PlanExecutor
                         srcDisk,
                         tgtDisk,
                         f.Size,
-                        f.SizeOnDisk
+                        f.SizeOnDisk,
+                        srcPath,
+                        tgtPath
                     ));
                 }
             }
@@ -420,29 +440,24 @@ public class PlanExecutor
             return;
         }
 
-        if (isSimulation)
-        {
-            await RunSimulationAsync(moveItems, snapshot, durationSeconds, maxThreads, ct).ConfigureAwait(false);
-        }
-        else
-        {
-            // Real execution will be plugged in via SafeFileMover in Phase 4
-            throw new NotSupportedException("Real filesystem execution is not enabled in this pass. Please select Simulation mode.");
-        }
+        IFileTransferOperator transferOperator = isSimulation
+            ? new SimulatedFileTransferOperator(durationSeconds, _totalBytes, maxThreads)
+            : new RealFileTransferOperator(config.VerifyCopies);
+
+        await ExecutePlanAsync(transferOperator, moveItems, snapshot, isSimulation, durationSeconds, maxThreads, ct).ConfigureAwait(false);
     }
 
-    private async Task RunSimulationAsync(
+    private async Task ExecutePlanAsync(
+        IFileTransferOperator transferOperator,
         List<FileMoveTask> tasks,
         PoolSnapshot snapshot,
+        bool isSimulation,
         int durationSeconds,
         int maxThreads,
         CancellationToken ct)
     {
-        bool isInstant = durationSeconds <= 0;
-        double targetRateBps = isInstant ? double.MaxValue : (double)_totalBytes / durationSeconds;
-        double targetFilesPerSec = isInstant ? double.MaxValue : (double)_totalFiles / durationSeconds;
-
         var lockManager = new PhysicalDiskLockManager();
+        var queueLock = new object();
 
         // Group tasks by physical spindle pair, retaining largest-first order in each queue
         var pairQueues = tasks
@@ -450,46 +465,102 @@ public class PlanExecutor
             .Select(g => new PairQueue(g.Key.SourceDisk, g.Key.TargetDisk, g))
             .ToList();
 
-        var activeWorkers = new List<SimWorker>();
+        var workerTasks = new List<Task>();
         for (int i = 0; i < maxThreads; i++)
         {
-            activeWorkers.Add(new SimWorker(i + 1));
+            int workerId = i + 1;
+            workerTasks.Add(Task.Run(() => RunWorkerLoopAsync(workerId, transferOperator, pairQueues, lockManager, queueLock, ct), ct));
         }
-
-        var lastTickTime = DateTime.UtcNow;
 
         try
         {
-            while (pairQueues.Any(pq => pq.Tasks.Count > 0) || activeWorkers.Any(w => w.CurrentTask != null))
+            await Task.WhenAll(workerTasks).ConfigureAwait(false);
+        }
+        finally
+        {
+            _activeTransfers.Clear();
+        }
+
+        lock (_stateLock)
+        {
+            _phase = "Cleaning Folders";
+            _activeTransfers.Clear();
+            foreach (var v in _volumeStates.Values)
             {
-                ct.ThrowIfCancellationRequested();
+                v.SetActivity("Cleaning empty folders", "Cleaning Folders");
+            }
+        }
 
-                var now = DateTime.UtcNow;
-                double elapsedDeltaSec = (now - lastTickTime).TotalSeconds;
-                if (elapsedDeltaSec <= 0) elapsedDeltaSec = 0.001;
-                lastTickTime = now;
+        var folderCleanup = FolderCleanupSimulator.Simulate(snapshot, tasks);
 
-                // 1. Assign work to idle workers (prioritize draining full source disks first)
+        lock (_stateLock)
+        {
+            _allFolderCleanupActions = folderCleanup.Actions;
+            _folderCleanup = folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty };
+            _completedAt = DateTime.UtcNow;
+            _isRunning = false;
+            _phase = "Completed";
+            _activeTransfers.Clear();
+
+            foreach (var v in _volumeStates.Values)
+            {
+                v.SetActivity("Complete", "Complete");
+            }
+        }
+    }
+
+    private async Task RunWorkerLoopAsync(
+        int workerId,
+        IFileTransferOperator transferOperator,
+        List<PairQueue> pairQueues,
+        PhysicalDiskLockManager lockManager,
+        object queueLock,
+        CancellationToken ct)
+    {
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            PairQueue? activeQueue = null;
+            IDisposable? lockReleaser = null;
+            FileMoveTask? currentTask = null;
+
+            lock (queueLock)
+            {
+                // Check if all work across all queues is done
+                if (pairQueues.All(pq => pq.Tasks.Count == 0))
+                {
+                    return;
+                }
+
+                // Prioritize draining fullest source disks first
                 var sortedQueues = pairQueues
                     .Where(pq => pq.Tasks.Count > 0)
                     .OrderByDescending(GetQueuePriority)
                     .ToList();
 
-                foreach (var worker in activeWorkers.Where(w => w.CurrentTask == null))
+                foreach (var pq in sortedQueues)
                 {
-                    // Pass 1: Try assigning tasks while respecting headroom reserve on target volumes
-                    bool assigned = TryAssignTask(worker, sortedQueues, respectHeadroomReserve: true, lockManager, targetRateBps, maxThreads);
-                    if (!assigned)
+                    // Pass 1: candidate respecting target volume headroom reserve
+                    // Pass 2: fallback to any fitting candidate so progress does not stall
+                    var candidateNode = FindCandidate(pq, respectHeadroomReserve: true)
+                                     ?? FindCandidate(pq, respectHeadroomReserve: false);
+
+                    if (candidateNode != null)
                     {
-                        // Pass 2 fallback: If no task fits with reserve, allow using reserve space so nothing stalls
-                        TryAssignTask(worker, sortedQueues, respectHeadroomReserve: false, lockManager, targetRateBps, maxThreads);
+                        if (lockManager.TryAcquire(pq.SourceDisk, pq.TargetDisk, out var releaser) && releaser != null)
+                        {
+                            activeQueue = pq;
+                            lockReleaser = releaser;
+                            currentTask = candidateNode.Value;
+                            pq.Tasks.Remove(candidateNode);
+                            break;
+                        }
                     }
                 }
 
-                // 2. Deadlock & Insufficient Space Guard:
-                // Check if all workers are idle and NO remaining task in ANY queue can fit on its destination volume.
-                int runningCount = activeWorkers.Count(w => w.CurrentTask != null);
-                if (runningCount == 0 && pairQueues.Any(pq => pq.Tasks.Count > 0))
+                // Deadlock check: all workers idle, queues have tasks, but no remaining task fits in destination free space
+                if (currentTask == null && _activeTransfers.IsEmpty && pairQueues.Any(pq => pq.Tasks.Count > 0))
                 {
                     bool hasAnyFittingTask = pairQueues.Any(pq => pq.Tasks.Any(t =>
                     {
@@ -524,161 +595,108 @@ public class PlanExecutor
                         );
                     }
                 }
-
-                // 3. Advance bytes & files on active workers
-                lock (_stateLock)
-            {
-                _activeWorkers = runningCount;
-                _throughputBps = (!isInstant && runningCount > 0) ? targetRateBps : 0;
             }
 
-            double tickBytesBudget = isInstant ? double.MaxValue : (runningCount > 0 ? (targetRateBps * elapsedDeltaSec) / runningCount : 0);
-            double tickFilesBudget = isInstant ? double.MaxValue : (runningCount > 0 ? (targetFilesPerSec * elapsedDeltaSec) / runningCount : 0);
-            int maxBatchFiles = isInstant ? 50000 : 10000;
-
-            foreach (var worker in activeWorkers.Where(w => w.CurrentTask != null))
+            if (currentTask == null)
             {
-                double budgetBytes = tickBytesBudget;
-                double budgetFiles = tickFilesBudget;
-                int filesCompletedThisTick = 0;
+                // Disks currently locked by other workers or waiting on headroom space; wait briefly and retry
+                await Task.Delay(25, ct).ConfigureAwait(false);
+                continue;
+            }
 
-                while (worker.CurrentTask != null && (budgetBytes > 0 || budgetFiles > 0) && filesCompletedThisTick < maxBatchFiles)
+            // We hold the physical spindle locks for this queue.
+            // Run tasks continuously on this spindle pair to maximize sequential I/O throughput.
+            try
+            {
+                while (currentTask != null)
                 {
-                    var task = worker.CurrentTask;
-                    long bytesRemainingOnTask = task.SizeOnDisk - worker.BytesCopied;
+                    ct.ThrowIfCancellationRequested();
 
-                    if (budgetBytes >= bytesRemainingOnTask || (budgetFiles >= 1 && bytesRemainingOnTask <= 0))
+                    if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var sVol))
+                        sVol.SetActivity($"Reading: \"{currentTask.FileName}\"", "Reading");
+                    if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tVol))
+                        tVol.SetActivity($"Writing: \"{currentTask.FileName}\"", "Writing");
+
+                    _activeTransfers[workerId] = new ActiveTransferInfo(
+                        workerId,
+                        currentTask.FileName,
+                        currentTask.SourceVolume,
+                        currentTask.TargetVolume,
+                        currentTask.SourceDisk,
+                        currentTask.TargetDisk,
+                        currentTask.SizeOnDisk,
+                        0,
+                        0
+                    );
+
+                    long taskBytesTransferred = 0;
+                    var sw = Stopwatch.StartNew();
+
+                    await transferOperator.TransferFileAsync(currentTask, bytesTransferred =>
                     {
-                        // Task completes in this tick
-                        long advance = bytesRemainingOnTask > 0 ? bytesRemainingOnTask : 0;
-                        worker.BytesCopied += advance;
-                        Interlocked.Add(ref _transferredBytes, advance);
-                        Interlocked.Increment(ref _transferredFiles);
-
-                        budgetBytes = Math.Max(0, budgetBytes - advance);
-                        budgetFiles = Math.Max(0, budgetFiles - 1);
-                        filesCompletedThisTick++;
-
-                        if (_volumeStates.TryGetValue(task.SourceVolume, out var srcState))
-                            srcState.CompleteMovedOut(task.TargetVolume, task.SizeOnDisk);
-                        if (_volumeStates.TryGetValue(task.TargetVolume, out var tgtState))
-                            tgtState.CompleteMovedIn(task.SourceVolume, task.SizeOnDisk);
-
-                        // Try to take next task from the same queue while holding the disk lock
-                        if (worker.CurrentQueue != null && worker.CurrentQueue.Tasks.Count > 0)
+                        long delta = bytesTransferred - taskBytesTransferred;
+                        if (delta > 0)
                         {
-                            var nextNode = FindCandidate(worker.CurrentQueue, respectHeadroomReserve: true)
-                                        ?? FindCandidate(worker.CurrentQueue, respectHeadroomReserve: false);
-
-                            if (nextNode != null)
-                            {
-                                var nextTask = nextNode.Value;
-                                worker.CurrentQueue.Tasks.Remove(nextNode);
-                                worker.SetNextTask(nextTask);
-
-                                if (_volumeStates.TryGetValue(nextTask.SourceVolume, out var sVol))
-                                    sVol.SetActivity($"Reading: \"{nextTask.FileName}\"", "Reading");
-                                if (_volumeStates.TryGetValue(nextTask.TargetVolume, out var tVol))
-                                    tVol.SetActivity($"Writing: \"{nextTask.FileName}\"", "Writing");
-
-                                _activeTransfers[worker.WorkerId] = new ActiveTransferInfo(
-                                    worker.WorkerId,
-                                    nextTask.FileName,
-                                    nextTask.SourceVolume,
-                                    nextTask.TargetVolume,
-                                    nextTask.SourceDisk,
-                                    nextTask.TargetDisk,
-                                    nextTask.SizeOnDisk,
-                                    0,
-                                    targetRateBps / maxThreads
-                                );
-                                continue;
-                            }
+                            taskBytesTransferred = bytesTransferred;
+                            Interlocked.Add(ref _transferredBytes, delta);
                         }
 
-                        // No more immediate tasks on this queue or target is full; worker completes
-                        if (_volumeStates.TryGetValue(task.SourceVolume, out var sVolDone))
-                            sVolDone.SetActivity("Idle", "Idle");
-                        if (_volumeStates.TryGetValue(task.TargetVolume, out var tVolDone))
-                            tVolDone.SetActivity("Idle", "Idle");
-
-                        worker.Complete();
-                        _activeTransfers.TryRemove(worker.WorkerId, out _);
-                        break;
-                    }
-                    else
-                    {
-                        // File takes longer than budget, partially advance
-                        long advance = (long)budgetBytes;
-                        if (advance <= 0 && bytesRemainingOnTask > 0) advance = bytesRemainingOnTask;
-
-                        worker.BytesCopied += advance;
-                        Interlocked.Add(ref _transferredBytes, advance);
-                        budgetBytes = 0;
-                        budgetFiles = 0;
-
-                        _activeTransfers[worker.WorkerId] = new ActiveTransferInfo(
-                            worker.WorkerId,
-                            task.FileName,
-                            task.SourceVolume,
-                            task.TargetVolume,
-                            task.SourceDisk,
-                            task.TargetDisk,
-                            task.SizeOnDisk,
-                            worker.BytesCopied,
-                            targetRateBps / maxThreads
+                        double bps = sw.Elapsed.TotalSeconds > 0 ? (double)taskBytesTransferred / sw.Elapsed.TotalSeconds : 0;
+                        _activeTransfers[workerId] = new ActiveTransferInfo(
+                            workerId,
+                            currentTask.FileName,
+                            currentTask.SourceVolume,
+                            currentTask.TargetVolume,
+                            currentTask.SourceDisk,
+                            currentTask.TargetDisk,
+                            currentTask.SizeOnDisk,
+                            taskBytesTransferred,
+                            bps
                         );
-                        break;
+                    }, ct).ConfigureAwait(false);
+
+                    // Successfully completed this file
+                    Interlocked.Increment(ref _transferredFiles);
+                    if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var srcState))
+                        srcState.CompleteMovedOut(currentTask.TargetVolume, currentTask.SizeOnDisk);
+                    if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tgtState))
+                        tgtState.CompleteMovedIn(currentTask.SourceVolume, currentTask.SizeOnDisk);
+
+                    // Check if another task can immediately be processed on this same spindle pair
+                    lock (queueLock)
+                    {
+                        var nextNode = FindCandidate(activeQueue!, respectHeadroomReserve: true)
+                                    ?? FindCandidate(activeQueue!, respectHeadroomReserve: false);
+
+                        if (nextNode != null)
+                        {
+                            currentTask = nextNode.Value;
+                            activeQueue!.Tasks.Remove(nextNode);
+                        }
+                        else
+                        {
+                            currentTask = null;
+                        }
                     }
                 }
             }
-
-            if (isInstant)
+            finally
             {
-                await Task.Yield();
-            }
-            else
-            {
-                await Task.Delay(50, ct).ConfigureAwait(false);
-            }
+                _activeTransfers.TryRemove(workerId, out _);
+                lockReleaser?.Dispose();
+                ResetVolumeActivityIfIdle();
             }
         }
-        finally
+    }
+
+    private void ResetVolumeActivityIfIdle()
+    {
+        foreach (var (volName, vs) in _volumeStates)
         {
-            foreach (var w in activeWorkers)
+            bool isStillActive = _activeTransfers.Values.Any(t => t.SourceVolume == volName || t.TargetVolume == volName);
+            if (!isStillActive && (vs.Status == "Reading" || vs.Status == "Writing"))
             {
-                w.Complete();
-            }
-        }
-
-        lock (_stateLock)
-        {
-            _phase = "Cleaning Folders";
-            _activeWorkers = 0;
-            _throughputBps = 0;
-            _activeTransfers.Clear();
-            foreach (var v in _volumeStates.Values)
-            {
-                v.SetActivity("Cleaning empty folders", "Cleaning Folders");
-            }
-        }
-
-        var folderCleanup = FolderCleanupSimulator.Simulate(snapshot, tasks);
-
-        lock (_stateLock)
-        {
-            _allFolderCleanupActions = folderCleanup.Actions;
-            _folderCleanup = folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty };
-            _completedAt = DateTime.UtcNow;
-            _isRunning = false;
-            _activeWorkers = 0;
-            _throughputBps = 0;
-            _phase = "Completed";
-            _activeTransfers.Clear();
-
-            foreach (var v in _volumeStates.Values)
-            {
-                v.SetActivity("Complete", "Complete");
+                vs.SetActivity("Idle", "Idle");
             }
         }
     }
@@ -744,47 +762,6 @@ public class PlanExecutor
         return score;
     }
 
-    private bool TryAssignTask(
-        SimWorker worker,
-        List<PairQueue> queues,
-        bool respectHeadroomReserve,
-        PhysicalDiskLockManager lockManager,
-        double targetRateBps,
-        int maxThreads)
-    {
-        foreach (var pq in queues.Where(pq => pq.Tasks.Count > 0))
-        {
-            var candidateNode = FindCandidate(pq, respectHeadroomReserve);
-            if (candidateNode == null) continue;
-
-            if (lockManager.TryAcquire(pq.SourceDisk, pq.TargetDisk, out var releaser) && releaser != null)
-            {
-                var task = candidateNode.Value;
-                pq.Tasks.Remove(candidateNode);
-                worker.StartTask(task, releaser, pq);
-
-                if (_volumeStates.TryGetValue(task.SourceVolume, out var srcVol))
-                    srcVol.SetActivity($"Reading: \"{task.FileName}\"", "Reading");
-                if (_volumeStates.TryGetValue(task.TargetVolume, out var tgtVol))
-                    tgtVol.SetActivity($"Writing: \"{task.FileName}\"", "Writing");
-
-                _activeTransfers[worker.WorkerId] = new ActiveTransferInfo(
-                    worker.WorkerId,
-                    task.FileName,
-                    task.SourceVolume,
-                    task.TargetVolume,
-                    task.SourceDisk,
-                    task.TargetDisk,
-                    task.SizeOnDisk,
-                    0,
-                    targetRateBps / maxThreads
-                );
-                return true;
-            }
-        }
-
-        return false;
-    }
 
     private static string FormatBytes(long bytes)
     {
@@ -801,37 +778,6 @@ public class PlanExecutor
         public LinkedList<FileMoveTask> Tasks { get; } = new(tasks);
     }
 
-    private sealed class SimWorker(int workerId)
-    {
-        public int WorkerId { get; } = workerId;
-        public FileMoveTask? CurrentTask { get; private set; }
-        public PairQueue? CurrentQueue { get; private set; }
-        public IDisposable? LockReleaser { get; private set; }
-        public long BytesCopied { get; set; }
-
-        public void StartTask(FileMoveTask task, IDisposable releaser, PairQueue queue)
-        {
-            CurrentTask = task;
-            LockReleaser = releaser;
-            CurrentQueue = queue;
-            BytesCopied = 0;
-        }
-
-        public void SetNextTask(FileMoveTask task)
-        {
-            CurrentTask = task;
-            BytesCopied = 0;
-        }
-
-        public void Complete()
-        {
-            LockReleaser?.Dispose();
-            LockReleaser = null;
-            CurrentQueue = null;
-            CurrentTask = null;
-            BytesCopied = 0;
-        }
-    }
 
     private sealed class VolumeState
     {
