@@ -76,7 +76,10 @@ public sealed record VolumePlanSummary(
     long FinalSize,
     bool IsEligible,
     string Status,
-    ImmutableArray<VolumeProvenance> Provenance
+    ImmutableArray<VolumeProvenance> Provenance,
+    long OtherItemsSizeOnDisk = 0,
+    long FilesMovedOut = 0,
+    long FilesMovedIn = 0
 );
 
 public sealed record PlanningWarning(string Message);

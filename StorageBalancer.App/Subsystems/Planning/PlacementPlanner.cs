@@ -80,8 +80,8 @@ public sealed class PlacementPlanner
 
         var root = Freeze(virtualRoot, snapshot.AllocationUnitSize, warnings);
         var ctx = new PlanContext(targets);
-        var duplicateRecord = new MatchRecord("** Duplicate", 999998);
-        var unmatchedRecord = new MatchRecord("** Unmatched", 999999);
+        var duplicateRecord = new MatchRecord("** Duplicate", -1);
+        var unmatchedRecord = new MatchRecord("** Unmatched", -1);
 
         PopulateUnassigned(root, ctx);
 
@@ -140,12 +140,7 @@ public sealed class PlacementPlanner
             ? ctx.Targets.Where(t => unmatched.AllowedVolumeAliases.Contains(t.Alias, StringComparer.OrdinalIgnoreCase)).ToList()
             : null;
 
-        // Process filler rules (primary copies of paths with Defer to filler)
-        ctx.Deferred = fillerDeferred;
-        ProcessDeferredStayPut(ctx, fillerAllowedTargets);
-        ProcessDeferredEmptiest(ctx, fillerAllowedTargets);
-
-        // Process duplicates
+        // 1. Process duplicates
         if (duplicates?.Consolidate == true)
         {
             ProcessConsolidatedDuplicates(duplicateDeferred, ctx, duplicateAllowedTargets, duplicateRecord);
@@ -155,12 +150,30 @@ public sealed class PlacementPlanner
             ctx.Deferred = duplicateDeferred;
             ProcessDeferredStayPut(ctx, duplicateAllowedTargets);
             ProcessDeferredEmptiest(ctx, duplicateAllowedTargets);
+            if (duplicateRecord.TotalSize > 0)
+            {
+                duplicateRecord.Order = ctx.DecisionCounter++;
+            }
         }
 
-        // Process unmatched catch-all at the very end
+        // 2. Process filler rules (primary copies of paths with Defer to filler)
+        ctx.Deferred = fillerDeferred;
+        ProcessDeferredStayPut(ctx, fillerAllowedTargets);
+        ProcessDeferredEmptiest(ctx, fillerAllowedTargets);
+
+        foreach (var fillerRecord in ctx.MatchRecords.Where(m => m.Order < 0 && m.TotalSize > 0))
+        {
+            fillerRecord.Order = ctx.DecisionCounter++;
+        }
+
+        // 3. Process unmatched catch-all at the very end
         ctx.Deferred = unmatchedDeferred;
         ProcessDeferredStayPut(ctx, unmatchedAllowedTargets);
         ProcessDeferredEmptiest(ctx, unmatchedAllowedTargets);
+        if (unmatchedRecord.TotalSize > 0)
+        {
+            unmatchedRecord.Order = ctx.DecisionCounter++;
+        }
 
         foreach (var kvp in ctx.DeferredDueToSpace.Where(x => x.Value > 0))
         {
@@ -237,7 +250,7 @@ public sealed class PlacementPlanner
             {
                 if (currentRecord == null && !string.IsNullOrEmpty(folder.RelativePath))
                 {
-                    currentRecord = new MatchRecord($"{folder.RelativePath} [filler]", ctx.DecisionCounter++);
+                    currentRecord = new MatchRecord($"{folder.RelativePath} [filler]", -1);
                     ctx.MatchRecords.Add(currentRecord);
                 }
                 else if (currentRecord == null && string.IsNullOrEmpty(folder.RelativePath))
@@ -245,7 +258,7 @@ public sealed class PlacementPlanner
                     var loose = folder.Children.OfType<PlanningFile>().Where(f => ctx.Unassigned.ContainsKey(f)).ToList();
                     if (loose.Count > 0)
                     {
-                        currentRecord = new MatchRecord("<Pool Root> (Loose files) [filler]", ctx.DecisionCounter++);
+                        currentRecord = new MatchRecord("<Pool Root> (Loose files) [filler]", -1);
                         ctx.MatchRecords.Add(currentRecord);
                     }
                 }
@@ -362,7 +375,8 @@ public sealed class PlacementPlanner
     private static void AssignOrSplitChunk(List<PlanningFile> files, string chunkName, FilePlacementRuleConfig rule, PlanContext ctx, MatchRecord duplicateRecord)
     {
         string recordName = rule.DeferToFiller ? $"{chunkName} [filler]" : chunkName;
-        var currentRecord = new MatchRecord(recordName, ctx.DecisionCounter++);
+        int order = rule.DeferToFiller ? -1 : ctx.DecisionCounter++;
+        var currentRecord = new MatchRecord(recordName, order);
         ctx.MatchRecords.Add(currentRecord);
 
         if (rule.DeferToFiller)
@@ -628,11 +642,10 @@ public sealed class PlacementPlanner
             .ToList();
 
         var allowedTargets = allowedTargetsOverride ?? ctx.Targets;
-        int nextDuplicateOrder = 999910;
 
         foreach (var group in duplicateGroups)
         {
-            var groupRecord = new MatchRecord(group.Key, nextDuplicateOrder++);
+            var groupRecord = new MatchRecord(group.Key, ctx.DecisionCounter++);
             ctx.MatchRecords.Add(groupRecord);
 
             long groupSize = group.Sum(d => d.Copy.SizeOnDisk);
@@ -803,13 +816,23 @@ public sealed class PlacementPlanner
             provenanceSizes[(target.Alias, target.Alias)] = target.OtherItemsSizeOnDisk;
         }
 
+        var filesMovedOut = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var filesMovedIn = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var kvp in ctx.CopyDestinations)
         {
             var targetAlias = kvp.Value;
+            var sourceAlias = kvp.Key.VolumeAlias;
             finalSizes[targetAlias] = AddSaturated(finalSizes.GetValueOrDefault(targetAlias), kvp.Key.SizeOnDisk);
 
-            var provKey = (targetAlias, kvp.Key.VolumeAlias);
+            var provKey = (targetAlias, sourceAlias);
             provenanceSizes[provKey] = AddSaturated(provenanceSizes.GetValueOrDefault(provKey), kvp.Key.SizeOnDisk);
+
+            if (!string.Equals(targetAlias, sourceAlias, StringComparison.OrdinalIgnoreCase))
+            {
+                filesMovedOut[sourceAlias] = filesMovedOut.GetValueOrDefault(sourceAlias) + 1;
+                filesMovedIn[targetAlias] = filesMovedIn.GetValueOrDefault(targetAlias) + 1;
+            }
         }
 
         var summaries = ImmutableArray.CreateBuilder<VolumePlanSummary>();
@@ -824,7 +847,10 @@ public sealed class PlacementPlanner
 
             summaries.Add(new VolumePlanSummary(
                 volume.Alias, volume.Disk, volume.MountPoint, volume.Capacity, finalSizes.GetValueOrDefault(volume.Alias),
-                isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance));
+                isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance,
+                volume.OtherItemsSizeOnDisk,
+                filesMovedOut.GetValueOrDefault(volume.Alias),
+                filesMovedIn.GetValueOrDefault(volume.Alias)));
         }
 
         return summaries.ToImmutable();
@@ -1075,7 +1101,7 @@ public sealed class PlacementPlanner
     private sealed class MatchRecord(string path, int order)
     {
         public string Path { get; } = path;
-        public int Order { get; } = order;
+        public int Order { get; set; } = order;
         public bool IsDeferred { get; set; }
         public long TotalSize { get; set; }
         public long MovedSize { get; set; }
