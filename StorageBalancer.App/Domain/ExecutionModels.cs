@@ -40,6 +40,17 @@ public record VolumeExecutionProgress(
     string CurrentActivity
 );
 
+public record FileMoveTask(
+    string FileName,
+    string RelativePath,
+    string SourceVolume,
+    string TargetVolume,
+    string SourceDisk,
+    string TargetDisk,
+    long Size,
+    long SizeOnDisk
+);
+
 public record ActiveTransferInfo(
     int WorkerId,
     string FileName,
@@ -50,6 +61,23 @@ public record ActiveTransferInfo(
     long FileSize,
     long BytesCopied,
     double ThroughputBps
+);
+
+public record FolderCleanupAction(
+    string RelativePath,
+    string VolumeAlias,
+    string PrimaryVolumeAlias,
+    string Status, // "Cleaned", "PreservedUnique", "KeptWithData"
+    string Reason
+);
+
+public record FolderCleanupSummary(
+    int TotalFoldersEvaluated,
+    int TotalFolderInstances,
+    int CleanedCount,
+    int PreservedUniqueCount,
+    int KeptWithDataCount,
+    ImmutableList<FolderCleanupAction> Actions
 );
 
 public record ExecutionStatus(
@@ -68,6 +96,7 @@ public record ExecutionStatus(
     string? Error,
     ImmutableList<VolumeExecutionProgress> Volumes,
     ImmutableList<ActiveTransferInfo> ActiveTransfers,
-    string Phase = "Idle"
+    string Phase = "Idle",
+    FolderCleanupSummary? FolderCleanup = null
 );
 

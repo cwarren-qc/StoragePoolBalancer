@@ -33,6 +33,8 @@ public class PlanExecutor
     private double _throughputBps;
     private int _activeWorkers;
     private string _phase = "Idle";
+    private FolderCleanupSummary? _folderCleanup;
+    private ImmutableList<FolderCleanupAction> _allFolderCleanupActions = ImmutableList<FolderCleanupAction>.Empty;
 
     private readonly ConcurrentDictionary<string, VolumeState> _volumeStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<int, ActiveTransferInfo> _activeTransfers = new();
@@ -81,8 +83,49 @@ public class PlanExecutor
                 _error,
                 volumes,
                 activeTransfers,
-                _phase
+                _phase,
+                _folderCleanup
             );
+        }
+    }
+
+    public (int TotalMatching, ImmutableList<FolderCleanupAction> Items) QueryFolderCleanup(string? status, string? search, int limit = 500, int offset = 0)
+    {
+        lock (_stateLock)
+        {
+            if (_allFolderCleanupActions.IsEmpty)
+                return (0, ImmutableList<FolderCleanupAction>.Empty);
+
+            IEnumerable<FolderCleanupAction> query = _allFolderCleanupActions;
+
+            if (!string.IsNullOrWhiteSpace(status) && !string.Equals(status, "All", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(a => string.Equals(a.Status, status, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                string s = search.Trim();
+                query = query.Where(a =>
+                    a.RelativePath.Contains(s, StringComparison.OrdinalIgnoreCase) ||
+                    a.VolumeAlias.Contains(s, StringComparison.OrdinalIgnoreCase) ||
+                    a.PrimaryVolumeAlias.Contains(s, StringComparison.OrdinalIgnoreCase) ||
+                    a.Reason.Contains(s, StringComparison.OrdinalIgnoreCase));
+            }
+
+            var matchingList = query.ToList();
+            int total = matchingList.Count;
+
+            if (offset < 0) offset = 0;
+            if (limit <= 0) limit = 500;
+            if (limit > 2000) limit = 2000;
+
+            var items = matchingList
+                .Skip(offset)
+                .Take(limit)
+                .ToImmutableList();
+
+            return (total, items);
         }
     }
 
@@ -102,6 +145,8 @@ public class PlanExecutor
             _completedAt = null;
             _error = null;
             _phase = "Preparing";
+            _folderCleanup = null;
+            _allFolderCleanupActions = ImmutableList<FolderCleanupAction>.Empty;
 
             _transferredBytes = 0;
             _transferredFiles = 0;
@@ -114,10 +159,19 @@ public class PlanExecutor
             if (maxThreads < 1) maxThreads = 1;
             if (maxThreads > 16) maxThreads = 16;
 
-            int durationSeconds = request.SimulationDurationSeconds > 0
-                ? request.SimulationDurationSeconds
-                : config.DefaultSimulationDurationSeconds;
-            if (durationSeconds < 5) durationSeconds = 5;
+            int durationSeconds;
+            if (request.SimulationDurationSeconds == 0)
+            {
+                durationSeconds = 0;
+            }
+            else if (request.SimulationDurationSeconds > 0)
+            {
+                durationSeconds = Math.Max(5, request.SimulationDurationSeconds);
+            }
+            else
+            {
+                durationSeconds = Math.Max(5, config.DefaultSimulationDurationSeconds);
+            }
 
             var token = _cts.Token;
             string snapName = request.SnapshotName ?? string.Empty;
@@ -368,7 +422,7 @@ public class PlanExecutor
 
         if (isSimulation)
         {
-            await RunSimulationAsync(moveItems, durationSeconds, maxThreads, ct).ConfigureAwait(false);
+            await RunSimulationAsync(moveItems, snapshot, durationSeconds, maxThreads, ct).ConfigureAwait(false);
         }
         else
         {
@@ -379,13 +433,14 @@ public class PlanExecutor
 
     private async Task RunSimulationAsync(
         List<FileMoveTask> tasks,
+        PoolSnapshot snapshot,
         int durationSeconds,
         int maxThreads,
         CancellationToken ct)
     {
-        if (durationSeconds <= 0) durationSeconds = 120;
-        double targetRateBps = (double)_totalBytes / durationSeconds;
-        double targetFilesPerSec = (double)_totalFiles / durationSeconds;
+        bool isInstant = durationSeconds <= 0;
+        double targetRateBps = isInstant ? double.MaxValue : (double)_totalBytes / durationSeconds;
+        double targetFilesPerSec = isInstant ? double.MaxValue : (double)_totalFiles / durationSeconds;
 
         var lockManager = new PhysicalDiskLockManager();
 
@@ -474,11 +529,12 @@ public class PlanExecutor
                 lock (_stateLock)
             {
                 _activeWorkers = runningCount;
-                _throughputBps = runningCount > 0 ? targetRateBps : 0;
+                _throughputBps = (!isInstant && runningCount > 0) ? targetRateBps : 0;
             }
 
-            double tickBytesBudget = runningCount > 0 ? (targetRateBps * elapsedDeltaSec) / runningCount : 0;
-            double tickFilesBudget = runningCount > 0 ? (targetFilesPerSec * elapsedDeltaSec) / runningCount : 0;
+            double tickBytesBudget = isInstant ? double.MaxValue : (runningCount > 0 ? (targetRateBps * elapsedDeltaSec) / runningCount : 0);
+            double tickFilesBudget = isInstant ? double.MaxValue : (runningCount > 0 ? (targetFilesPerSec * elapsedDeltaSec) / runningCount : 0);
+            int maxBatchFiles = isInstant ? 50000 : 10000;
 
             foreach (var worker in activeWorkers.Where(w => w.CurrentTask != null))
             {
@@ -486,7 +542,7 @@ public class PlanExecutor
                 double budgetFiles = tickFilesBudget;
                 int filesCompletedThisTick = 0;
 
-                while (worker.CurrentTask != null && (budgetBytes > 0 || budgetFiles > 0) && filesCompletedThisTick < 10000)
+                while (worker.CurrentTask != null && (budgetBytes > 0 || budgetFiles > 0) && filesCompletedThisTick < maxBatchFiles)
                 {
                     var task = worker.CurrentTask;
                     long bytesRemainingOnTask = task.SizeOnDisk - worker.BytesCopied;
@@ -577,7 +633,14 @@ public class PlanExecutor
                 }
             }
 
-            await Task.Delay(50, ct).ConfigureAwait(false);
+            if (isInstant)
+            {
+                await Task.Yield();
+            }
+            else
+            {
+                await Task.Delay(50, ct).ConfigureAwait(false);
+            }
             }
         }
         finally
@@ -590,6 +653,22 @@ public class PlanExecutor
 
         lock (_stateLock)
         {
+            _phase = "Cleaning Folders";
+            _activeWorkers = 0;
+            _throughputBps = 0;
+            _activeTransfers.Clear();
+            foreach (var v in _volumeStates.Values)
+            {
+                v.SetActivity("Cleaning empty folders", "Cleaning Folders");
+            }
+        }
+
+        var folderCleanup = FolderCleanupSimulator.Simulate(snapshot, tasks);
+
+        lock (_stateLock)
+        {
+            _allFolderCleanupActions = folderCleanup.Actions;
+            _folderCleanup = folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty };
             _completedAt = DateTime.UtcNow;
             _isRunning = false;
             _activeWorkers = 0;
@@ -720,26 +799,6 @@ public class PlanExecutor
         public string SourceDisk { get; } = sourceDisk;
         public string TargetDisk { get; } = targetDisk;
         public LinkedList<FileMoveTask> Tasks { get; } = new(tasks);
-    }
-
-    private sealed class FileMoveTask(
-        string fileName,
-        string relativePath,
-        string sourceVolume,
-        string targetVolume,
-        string sourceDisk,
-        string targetDisk,
-        long size,
-        long sizeOnDisk)
-    {
-        public string FileName { get; } = fileName;
-        public string RelativePath { get; } = relativePath;
-        public string SourceVolume { get; } = sourceVolume;
-        public string TargetVolume { get; } = targetVolume;
-        public string SourceDisk { get; } = sourceDisk;
-        public string TargetDisk { get; } = targetDisk;
-        public long Size { get; } = size;
-        public long SizeOnDisk { get; } = sizeOnDisk;
     }
 
     private sealed class SimWorker(int workerId)

@@ -290,6 +290,7 @@
                     <div class="field" style="width:180px;">
                         <div class="field-header" title="Simulated time scale for file balancing">Sim Duration</div>
                         <select id="sim-duration">
+                            <option value="0">0s (Instant / No delay)</option>
                             <option value="30">30 seconds</option>
                             <option value="60">1 minute</option>
                             <option value="120" selected>2 minutes (Default)</option>
@@ -317,6 +318,10 @@
                         <span class="exec-stat-label">Transfer Speed</span>
                         <span class="exec-stat-value" id="exec-speed">0 MB/s</span>
                     </div>
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Folders Cleaned</span>
+                        <span class="exec-stat-value" id="exec-folders-cleaned">-</span>
+                    </div>
                     <div class="exec-progress-container">
                         <div class="exec-progress-fill" id="exec-progress-fill"></div>
                     </div>
@@ -340,6 +345,7 @@
                         <tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">No simulation running. Select a snapshot and click 'Run Simulation'.</td></tr>
                     </tbody>
                 </table>
+                <div id="exec-folder-cleanup-container" style="display:none; margin-top:20px;"></div>
             </div>
         </details>
     </main>
@@ -968,7 +974,9 @@
             const execFiles = document.getElementById('exec-files');
             const execSpeed = document.getElementById('exec-speed');
             const execProgressFill = document.getElementById('exec-progress-fill');
+            const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
             const notice = document.getElementById('exec-notice');
+            const folderContainer = document.getElementById('exec-folder-cleanup-container');
 
             btnStart.style.display = status.isRunning ? 'none' : 'inline-flex';
             btnCancel.style.display = status.isRunning ? 'inline-flex' : 'none';
@@ -979,6 +987,7 @@
 
             if (status.isRunning) {
                 summaryBar.style.display = 'flex';
+                if (folderContainer) folderContainer.style.display = 'none';
                 const isPrep = status.phase === 'Preparing' || !status.volumes || status.volumes.length === 0;
                 if (isPrep) {
                     subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
@@ -986,6 +995,14 @@
                     execTransferred.textContent = 'Analyzing...';
                     execFiles.textContent = 'Analyzing...';
                     execSpeed.textContent = '0 MB/s';
+                    if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
+                } else if (status.phase === 'Cleaning Folders') {
+                    subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Simulating safe empty folder cleanup across volumes...';
+                    execPct.textContent = '100%';
+                    execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
+                    execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
+                    execSpeed.textContent = '0 MB/s';
+                    if (execFoldersCleaned) execFoldersCleaned.textContent = 'Cleaning...';
                 } else {
                     subtitle.textContent = status.isCancellationRequested ? 'Cancelling simulation...' : 'Simulation running...';
                     const pct = status.progressPercent || 0;
@@ -994,6 +1011,7 @@
                     execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
                     execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
                     execSpeed.textContent = status.throughputBps > 0 ? `${(status.throughputBps / (1024 * 1024)).toFixed(1)} MB/s` : '0 MB/s';
+                    if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
                 }
                 Balancer.execution.renderTable(status, execTbody, volumeColors);
             } else if (status.completedAt) {
@@ -1004,6 +1022,9 @@
                 execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
                 execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
                 execSpeed.textContent = '0 MB/s';
+                if (execFoldersCleaned) {
+                    execFoldersCleaned.textContent = status.folderCleanup ? (status.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
+                }
                 Balancer.execution.renderTable(status, execTbody, volumeColors);
 
                 if (status.error) {
@@ -1015,8 +1036,20 @@
                     notice.textContent = 'Simulation finished successfully.';
                     notice.className = 'notice success';
                 }
+
+                if (folderContainer && status.folderCleanup) {
+                    Balancer.execution.renderFolderCleanup(status.folderCleanup, folderContainer);
+                } else if (folderContainer) {
+                    folderContainer.style.display = 'none';
+                    folderContainer.innerHTML = '';
+                }
             } else {
                 subtitle.textContent = '';
+                if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
+                if (folderContainer) {
+                    folderContainer.style.display = 'none';
+                    folderContainer.innerHTML = '';
+                }
             }
         }
 
@@ -1034,7 +1067,8 @@
             }
 
             const threads = parseInt(document.getElementById('sim-threads').value) || 2;
-            const duration = parseInt(document.getElementById('sim-duration').value) || 120;
+            const durationVal = parseInt(document.getElementById('sim-duration').value);
+            const duration = isNaN(durationVal) ? 120 : durationVal;
             const planDetails = document.getElementById('details-plan');
             const execDetails = document.getElementById('details-exec');
 
@@ -1059,6 +1093,13 @@
             const execTbody = document.getElementById('exec-tbody');
             const btnStart = document.getElementById('btn-exec-start');
             const btnCancel = document.getElementById('btn-exec-cancel');
+            const folderContainer = document.getElementById('exec-folder-cleanup-container');
+            const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
+            if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
+            if (folderContainer) {
+                folderContainer.style.display = 'none';
+                folderContainer.innerHTML = '';
+            }
 
             // Immediate UI feedback on button click
             btnStart.style.display = 'none';

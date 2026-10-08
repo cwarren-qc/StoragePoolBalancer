@@ -162,6 +162,10 @@
                         <span class="exec-stat-label">Transfer Speed</span>
                         <span class="exec-stat-value" id="exec-speed">0 MB/s</span>
                     </div>
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Folders Cleaned</span>
+                        <span class="exec-stat-value" id="exec-folders-cleaned">-</span>
+                    </div>
                     <div class="exec-progress-container">
                         <div class="exec-progress-fill" id="exec-progress-fill"></div>
                     </div>
@@ -407,6 +411,9 @@
                     </td>
                 </tr>`;
 
+            const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
+            if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
+
             return new Promise(async (resolve, reject) => {
                 try {
                     await Balancer.execution.start({
@@ -430,6 +437,14 @@
                             execTransferred.textContent = 'Analyzing...';
                             execFiles.textContent = 'Analyzing...';
                             execSpeed.textContent = '0 MB/s';
+                            if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
+                        } else if (status.phase === 'Cleaning Folders') {
+                            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Cleaning empty folders across volumes...';
+                            execPct.textContent = '100%';
+                            execTransferred.textContent = `${Balancer.formatBytes(status.transferredBytes)} / ${Balancer.formatBytes(status.totalBytes)}`;
+                            execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
+                            execSpeed.textContent = '0 MB/s';
+                            if (execFoldersCleaned) execFoldersCleaned.textContent = 'Cleaning...';
                         } else {
                             execSubtitle.textContent = 'Executing file balancing...';
                             const pct = status.progressPercent || 0;
@@ -438,6 +453,7 @@
                             execTransferred.textContent = `${Balancer.formatBytes(status.transferredBytes)} / ${Balancer.formatBytes(status.totalBytes)}`;
                             execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
                             execSpeed.textContent = status.throughputBps > 0 ? `${(status.throughputBps / (1024 * 1024)).toFixed(1)} MB/s` : '0 MB/s';
+                            if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
                         }
 
                         Balancer.execution.renderTable(status, execTbody, volumeColors);
@@ -451,6 +467,9 @@
                                 execPct.textContent = '100%';
                                 execProgressFill.style.width = '100%';
                                 execSpeed.textContent = '0 MB/s';
+                                if (execFoldersCleaned) {
+                                    execFoldersCleaned.textContent = status.folderCleanup ? (status.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
+                                }
                                 resolve();
                             }
                         }
