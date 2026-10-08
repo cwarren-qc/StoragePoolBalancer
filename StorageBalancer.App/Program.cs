@@ -5,12 +5,15 @@ using StorageBalancer.App.Subsystems.Storage;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Subsystems.Scanner;
 using StorageBalancer.App.Subsystems.Planning;
+using StorageBalancer.App.Subsystems.Execution;
+using StorageBalancer.App.Domain;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using System;
 using System.Linq;
 using System.IO;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,6 +21,7 @@ builder.Services.AddSingleton<ConfigManager>();
 builder.Services.AddSingleton<JsonStateRepository>();
 builder.Services.AddSingleton<StateScanner>();
 builder.Services.AddSingleton<PlacementPlanner>();
+builder.Services.AddSingleton<PlanExecutor>();
 
 builder.Services.AddEndpointsApiExplorer();
 
@@ -155,7 +159,7 @@ app.MapGet("/api/snapshots", (ConfigManager configManager, IWebHostEnvironment e
     return Results.Ok(snapshots);
 });
 
-app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, JsonStateRepository repository, PlacementPlanner planner, IWebHostEnvironment environment) =>
+app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, JsonStateRepository repository, PlacementPlanner planner, PlanExecutor executor, IWebHostEnvironment environment) =>
 {
     if (string.IsNullOrWhiteSpace(request?.SnapshotName))
         return Results.BadRequest(new { Error = "Choose a snapshot." });
@@ -182,13 +186,26 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
         if (snapshot is null)
             return Results.NotFound(new { Error = "The selected snapshot was not found." });
 
-        return Results.Ok(planner.CreatePlan(
+        var fullPlan = planner.CreatePlan(
             snapshot,
             config.FilePlacementRules,
             config.Duplicates,
             config.Filler,
             config.Unmatched,
-            request?.IncludeFiles ?? false));
+            includeFiles: true);
+
+        executor.CachePlan(snapshotName, snapshot.ScannedAt, config, fullPlan);
+
+        if (request?.IncludeFiles == true)
+        {
+            return Results.Ok(fullPlan);
+        }
+
+        var strippedPlacements = fullPlan.Placements
+            .Select(p => p with { Files = null })
+            .ToImmutableArray();
+
+        return Results.Ok(fullPlan with { Placements = strippedPlacements });
     }
     catch (InvalidDataException exception)
     {
@@ -202,6 +219,46 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
     {
         return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {exception.Message}" });
     }
+});
+
+app.MapPost("/api/execution/start", (ExecutionStartRequest? request, ConfigManager configManager, JsonStateRepository repository, PlanExecutor executor, IWebHostEnvironment environment) =>
+{
+    if (string.IsNullOrWhiteSpace(request?.SnapshotName))
+        return Results.BadRequest(new { Error = "Choose a snapshot to execute." });
+
+    var snapshotName = request.SnapshotName.Trim();
+    var config = configManager.Load();
+    if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
+        return Results.BadRequest(new { Error = "Configure a snapshots folder before executing." });
+
+    string snapshotPath;
+    try
+    {
+        snapshotPath = Path.Combine(ResolveSnapshotsFolder(config, environment), $"{snapshotName}.json");
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { Error = $"Invalid snapshot path: {ex.Message}" });
+    }
+
+    var snapshot = repository.LoadSnapshot(snapshotPath);
+    if (snapshot is null)
+        return Results.NotFound(new { Error = "The selected snapshot was not found." });
+
+    if (!executor.TryStartExecution(config, snapshot, request))
+        return Results.Conflict(new { Error = "An execution or simulation is already running." });
+
+    return Results.Accepted("/api/execution/status", executor.GetStatus());
+});
+
+app.MapGet("/api/execution/status", (PlanExecutor executor) => executor.GetStatus());
+
+app.MapPost("/api/execution/cancel", (PlanExecutor executor) =>
+{
+    if (!executor.TryCancel())
+        return Results.Conflict(new { Error = "There is no active execution to cancel." });
+
+    return Results.Accepted("/api/execution/status", executor.GetStatus());
 });
 
 static string ResolveSnapshotsFolder(AppConfig config, IWebHostEnvironment environment)

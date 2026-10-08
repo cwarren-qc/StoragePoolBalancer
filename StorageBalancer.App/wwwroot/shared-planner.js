@@ -128,7 +128,7 @@ window.Balancer.plan = {
             <details class="sub-details" id="plan-details-placements" ${sectionsOpen ? 'open' : ''} style="margin-top:16px;">
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Folder placement decisions and file balancing rules">Path Placements</span>
-                    <label style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement" onclick="event.stopPropagation();">
+                    <label class="plan-stayed-intact-toggle" style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement" onclick="event.stopPropagation();">
                         <input type="checkbox" class="plan-cb-intact" ${state.showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
                     </label>
                 </summary>
@@ -188,46 +188,67 @@ window.Balancer.plan = {
             return map;
         }
 
-        function renderProportionalBar(usedSegments, totalUsed, capacity, volumeColors) {
+        function renderVolumeDualBars(startSegments, startUsed, endSegments, endUsed, capacity, volumeColors) {
             if (capacity <= 0) {
-                return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px;"></div>`;
+                const emptyBar = `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px;"></div>`;
+                return { startBarHtml: emptyBar, endBarHtml: emptyBar };
             }
 
-            if (totalUsed <= 0) {
-                return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px; overflow:hidden;">
-                    <div class="free-segment" style="width:100%;" title="${formatBytes(capacity)} free (100% of capacity)"></div>
+            const maxUsed = Math.max(startUsed, endUsed);
+            const minFreeBytes = Math.max(0, capacity - maxUsed);
+            const minFreePct = capacity > 0 ? (minFreeBytes / capacity) * 100 : 0;
+
+            // Both bars share the exact same scale so that fixed/stayed data aligns vertically with 100% precision!
+            const isCut = minFreePct > 30;
+            const visualMaxFreePct = isCut ? 30 : minFreePct;
+            const visualMaxUsedPct = 100 - visualMaxFreePct;
+
+            // Scale: percentage of bar width per byte of data
+            const scale = maxUsed > 0 ? (visualMaxUsedPct / maxUsed) : 0;
+
+            function buildBar(segments, usedBytes) {
+                if (usedBytes <= 0) {
+                    return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px; overflow:hidden;">
+                        <div class="free-segment" style="width:100%;" title="${formatBytes(capacity)} free (100% of capacity)"></div>
+                    </div>`;
+                }
+
+                const segmentElements = segments.filter(s => s.size > 0).map(item => {
+                    const color = volumeColors.get(item.alias) || '#89958f';
+                    const pctOfBar = item.size * scale;
+                    const isOtherClass = item.isOther ? ' is-other' : '';
+                    return `<span class="provenance-segment${isOtherClass}" style="width:${pctOfBar}%; background-color:${color};" title="${escapeHtml(item.tooltip)}"></span>`;
+                }).join('');
+
+                const freeBytes = Math.max(0, capacity - usedBytes);
+                const actualFreePct = (freeBytes / capacity) * 100;
+                const usedBarPct = usedBytes * scale;
+                const visualFreePct = Math.max(0, 100 - usedBarPct);
+
+                let freeElement = '';
+                if (visualFreePct > 0) {
+                    const barIsCut = actualFreePct > 30;
+                    const cutClass = barIsCut ? 'is-cut' : '';
+                    const cutTitle = barIsCut
+                        ? `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity - cut representation)`
+                        : `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity)`;
+                    
+                    const cutBreak = barIsCut ? '<span class="break-indicator" title="Scale cut break: Free space exceeds 30%"></span>' : '';
+                    freeElement = `<div class="free-segment ${cutClass}" style="width:${visualFreePct}%;" title="${escapeHtml(cutTitle)}">${cutBreak}</div>`;
+                }
+
+                return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#d4dbd1; border-radius:3px; overflow:hidden;">
+                    ${segmentElements}
+                    ${freeElement}
                 </div>`;
             }
 
-            const freeBytes = Math.max(0, capacity - totalUsed);
-            const actualFreePct = (freeBytes / capacity) * 100;
-            const isCut = actualFreePct > 30;
-            const visualFreePct = isCut ? 30 : actualFreePct;
-            const visualUsedTotalPct = 100 - visualFreePct;
-
-            const segmentElements = usedSegments.filter(s => s.size > 0).map(item => {
-                const color = volumeColors.get(item.alias) || '#89958f';
-                const pctOfBar = totalUsed > 0 ? (item.size / totalUsed) * visualUsedTotalPct : 0;
-                const isOtherClass = item.isOther ? ' is-other' : '';
-                return `<span class="provenance-segment${isOtherClass}" style="width:${pctOfBar}%; background-color:${color};" title="${escapeHtml(item.tooltip)}"></span>`;
-            }).join('');
-
-            let freeElement = '';
-            if (visualFreePct > 0) {
-                const cutClass = isCut ? 'is-cut' : '';
-                const cutTitle = isCut
-                    ? `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity - cut representation)`
-                    : `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity)`;
-                
-                const cutBreak = isCut ? '<span class="break-indicator" title="Scale cut break: Free space exceeds 30%"></span>' : '';
-                freeElement = `<div class="free-segment ${cutClass}" style="width:${visualFreePct}%;" title="${escapeHtml(cutTitle)}">${cutBreak}</div>`;
-            }
-
-            return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#d4dbd1; border-radius:3px; overflow:hidden;">
-                ${segmentElements}
-                ${freeElement}
-            </div>`;
+            return {
+                startBarHtml: buildBar(startSegments, startUsed),
+                endBarHtml: buildBar(endSegments, endUsed)
+            };
         }
+        window.Balancer.renderVolumeDualBars = renderVolumeDualBars;
 
         function renderVolumes() {
             const tbody = containerEl.querySelector('.plan-volume-tbody');
@@ -282,7 +303,6 @@ window.Balancer.plan = {
                         tooltip: `${formatBytes(out.size)} moves to ${out.alias}`
                     });
                 });
-                const startBarHtml = renderProportionalBar(startSegments, startSize, capacity, state.volumeColors);
 
                 // --- 2. END BAR: OtherItems + Stayed pool items + Incoming items from other volumes ---
                 const endSegments = [];
@@ -310,7 +330,8 @@ window.Balancer.plan = {
                         tooltip: `${formatBytes(inc.size)} moved from ${inc.alias}`
                     });
                 });
-                const endBarHtml = renderProportionalBar(endSegments, finalSize, capacity, state.volumeColors);
+
+                const { startBarHtml, endBarHtml } = renderVolumeDualBars(startSegments, startSize, endSegments, finalSize, capacity, state.volumeColors);
 
                 const outgoingBytes = transferData.outgoing.reduce((sum, o) => sum + o.size, 0);
                 const incomingBytes = transferData.incoming.reduce((sum, i) => sum + i.size, 0);

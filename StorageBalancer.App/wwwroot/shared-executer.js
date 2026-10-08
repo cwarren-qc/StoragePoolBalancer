@@ -26,270 +26,311 @@ if (!window.Balancer.formatBytes) {
     };
 }
 
+if (!window.Balancer.getVolumeColorMap) {
+    window.Balancer.getVolumeColorMap = function (volumes) {
+        return new Map((volumes || []).map((v, index) => {
+            const alias = typeof v === 'string' ? v : v.alias;
+            return [alias, `hsl(${Math.round((index * 137.508 + 145) % 360)} 58% 42%)`];
+        }));
+    };
+}
+
+// Proportional Dual Bar Renderer with Shared Scale Cut
+function renderVolumeDualBars(startSegments, startUsed, endSegments, endUsed, capacity, volumeColors) {
+    const escapeHtml = window.Balancer.escapeHtml;
+    const formatBytes = window.Balancer.formatBytes;
+
+    if (capacity <= 0) {
+        const emptyBar = `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px;"></div>`;
+        return { startBarHtml: emptyBar, endBarHtml: emptyBar };
+    }
+
+    const maxUsed = Math.max(startUsed, endUsed);
+    const minFreeBytes = Math.max(0, capacity - maxUsed);
+    const minFreePct = capacity > 0 ? (minFreeBytes / capacity) * 100 : 0;
+
+    // Both bars share the exact same scale so that fixed/stayed data aligns vertically with 100% precision!
+    const isCut = minFreePct > 30;
+    const visualMaxFreePct = isCut ? 30 : minFreePct;
+    const visualMaxUsedPct = 100 - visualMaxFreePct;
+
+    // Scale: percentage of bar width per byte of data
+    const scale = maxUsed > 0 ? (visualMaxUsedPct / maxUsed) : 0;
+
+    function buildBar(segments, usedBytes) {
+        if (usedBytes <= 0) {
+            return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#e4e8e1; border-radius:3px; overflow:hidden;">
+                <div class="free-segment" style="width:100%;" title="${formatBytes(capacity)} free (100% of capacity)"></div>
+            </div>`;
+        }
+
+        const segmentElements = segments.filter(s => s.size > 0).map(item => {
+            const color = volumeColors.get(item.alias) || '#89958f';
+            const pctOfBar = item.size * scale;
+            const isOtherClass = item.isOther ? ' is-other' : '';
+            return `<span class="provenance-segment${isOtherClass}" style="width:${pctOfBar}%; background-color:${color};" title="${escapeHtml(item.tooltip)}"></span>`;
+        }).join('');
+
+        const freeBytes = Math.max(0, capacity - usedBytes);
+        const actualFreePct = (freeBytes / capacity) * 100;
+        const usedBarPct = usedBytes * scale;
+        const visualFreePct = Math.max(0, 100 - usedBarPct);
+
+        let freeElement = '';
+        if (visualFreePct > 0) {
+            const barIsCut = actualFreePct > 30;
+            const cutClass = barIsCut ? 'is-cut' : '';
+            const cutTitle = barIsCut
+                ? `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity - cut representation)`
+                : `${formatBytes(freeBytes)} free (${actualFreePct.toFixed(1)}% of capacity)`;
+            
+            const cutBreak = barIsCut ? '<span class="break-indicator" title="Scale cut break: Free space exceeds 30%"></span>' : '';
+            freeElement = `<div class="free-segment ${cutClass}" style="width:${visualFreePct}%;" title="${escapeHtml(cutTitle)}">${cutBreak}</div>`;
+        }
+
+        return `<div class="provenance-bar" style="margin:0; height:13px; display:flex; background:#d4dbd1; border-radius:3px; overflow:hidden;">
+            ${segmentElements}
+            ${freeElement}
+        </div>`;
+    }
+
+    return {
+        startBarHtml: buildBar(startSegments, startUsed),
+        endBarHtml: buildBar(endSegments, endUsed)
+    };
+}
+
 // Executer Subsystem
 window.Balancer.execution = {
-    renderTable(volumeRows, tbodyEl) {
+    async start(options = {}) {
+        const res = await fetch('/api/execution/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                snapshotName: options.snapshotName || null,
+                isSimulation: options.isSimulation !== false,
+                simulationDurationSeconds: options.simulationDurationSeconds || 120,
+                maxThreads: options.maxThreads || null,
+                verifyCopies: options.verifyCopies !== false
+            })
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.error || 'Failed to start execution');
+        }
+        return data;
+    },
+
+    async fetchStatus() {
+        const res = await fetch('/api/execution/status');
+        if (!res.ok) {
+            throw new Error('Failed to retrieve execution status');
+        }
+        return await res.json();
+    },
+
+    async cancel() {
+        const res = await fetch('/api/execution/cancel', { method: 'POST' });
+        if (!res.ok) {
+            throw new Error('Failed to cancel execution');
+        }
+        return await res.json();
+    },
+
+    renderTable(status, tbodyEl, volumeColors) {
         if (!tbodyEl) return;
         const escapeHtml = window.Balancer.escapeHtml;
         const formatBytes = window.Balancer.formatBytes;
 
-        if (!volumeRows || volumeRows.length === 0) {
+        const volumes = status?.volumes || [];
+        if (!volumes || volumes.length === 0) {
+            if (status?.isRunning) {
+                tbodyEl.innerHTML = `
+                    <tr>
+                        <td colspan="6" style="text-align:center; padding:32px 16px; color:var(--deep); background:#eaf2ed; border-radius:6px;">
+                            <div style="display:flex; align-items:center; justify-content:center; gap:10px; font-size:14px; font-weight:700;">
+                                <span class="spinner" style="width:16px; height:16px;"></span>
+                                <span>Preparing execution... Computing file placements and transfer queues...</span>
+                            </div>
+                            <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+                                Analyzing pool structure and balancing rules across volumes. Moves will begin in a few moments.
+                            </div>
+                        </td>
+                    </tr>`;
+                return;
+            }
             tbodyEl.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">No execution data available.</td></tr>';
             return;
         }
 
-        tbodyEl.innerHTML = volumeRows.map(vol => {
-            let stateHtml = '';
-            if (vol.status === 'Complete') {
-                stateHtml = '<span class="state-pill state-complete">Complete</span>';
-            } else if (vol.status === 'Transferring') {
-                stateHtml = '<span class="state-text"><span class="status-dot dot-scan"></span>Transferring</span>';
-            } else if (vol.status === 'Failed') {
-                stateHtml = '<span class="state-pill state-failed">Failed</span>';
+        const colors = volumeColors || window.Balancer.getVolumeColorMap(volumes);
+        const activeTransfers = status.activeTransfers || [];
+
+        // Build active transfers lookup by volume
+        const transferByVol = new Map();
+        activeTransfers.forEach(t => {
+            if (t.sourceVolume && !transferByVol.has(t.sourceVolume)) {
+                transferByVol.set(t.sourceVolume, { ...t, role: 'Reading' });
+            }
+            if (t.targetVolume && !transferByVol.has(t.targetVolume)) {
+                transferByVol.set(t.targetVolume, { ...t, role: 'Writing' });
+            }
+        });
+
+        const sortedVols = [...volumes].sort((a, b) => a.alias.localeCompare(b.alias, undefined, { numeric: true }));
+
+        tbodyEl.innerHTML = sortedVols.map(vol => {
+            const color = colors.get(vol.alias) || '#89958f';
+            const capacity = vol.capacity || 0;
+            const otherItems = vol.otherItemsSizeOnDisk || 0;
+            const stayedPool = Math.max(0, vol.stayedSize - otherItems);
+
+            // 1. START BAR: Other + Stayed pool files + Remaining Outgoing to other volumes
+            const startSegments = [];
+            if (otherItems > 0) {
+                startSegments.push({
+                    alias: vol.alias,
+                    size: otherItems,
+                    isOther: true,
+                    tooltip: `${formatBytes(otherItems)} Other items (outside PoolPart) on ${vol.alias}`
+                });
+            }
+            if (stayedPool > 0) {
+                startSegments.push({
+                    alias: vol.alias,
+                    size: stayedPool,
+                    isOther: false,
+                    tooltip: `${formatBytes(stayedPool)} pool files staying on ${vol.alias}`
+                });
+            }
+            (vol.outgoingRemaining || []).forEach(seg => {
+                if (seg.remainingBytes > 0) {
+                    startSegments.push({
+                        alias: seg.alias,
+                        size: seg.remainingBytes,
+                        isOther: false,
+                        tooltip: `${formatBytes(seg.remainingBytes)} waiting to move to ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
+                    });
+                }
+            });
+            const topTotalUsed = startSegments.reduce((sum, s) => sum + s.size, 0);
+
+            // 2. END BAR: Other + Stayed pool files (expands as inbound land!) + Remaining Inbound
+            const endSegments = [];
+            if (otherItems > 0) {
+                endSegments.push({
+                    alias: vol.alias,
+                    size: otherItems,
+                    isOther: true,
+                    tooltip: `${formatBytes(otherItems)} Other items (outside PoolPart) on ${vol.alias}`
+                });
+            }
+            if (stayedPool > 0) {
+                endSegments.push({
+                    alias: vol.alias,
+                    size: stayedPool,
+                    isOther: false,
+                    tooltip: `${formatBytes(stayedPool)} pool files on ${vol.alias}`
+                });
+            }
+            (vol.incomingRemaining || []).forEach(seg => {
+                if (seg.remainingBytes > 0) {
+                    endSegments.push({
+                        alias: seg.alias,
+                        size: seg.remainingBytes,
+                        isOther: false,
+                        tooltip: `${formatBytes(seg.remainingBytes)} waiting to move in from ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
+                    });
+                }
+            });
+            const bottomTotalUsed = endSegments.reduce((sum, s) => sum + s.size, 0);
+            const { startBarHtml, endBarHtml } = renderVolumeDualBars(startSegments, topTotalUsed, endSegments, bottomTotalUsed, capacity, colors);
+
+            // Activity status column
+            let activityHtml = '';
+            const active = transferByVol.get(vol.alias);
+            const isAllDone = (vol.outgoingRemaining || []).every(s => s.remainingBytes <= 0) &&
+                              (vol.incomingRemaining || []).every(s => s.remainingBytes <= 0);
+
+            if (active) {
+                const isWriting = active.role === 'Writing';
+                const dotClass = isWriting ? 'dot-scan' : 'dot-scan';
+                const dotColor = isWriting ? '#2085ec' : 'var(--green)';
+                const speedText = active.throughputBps > 0 ? `(${formatBytes(active.throughputBps)}/s)` : '';
+                activityHtml = `
+                    <div style="display:flex; align-items:center; gap:6px; overflow:hidden;" title="${escapeHtml(active.fileName)}">
+                        <span class="status-dot ${dotClass}" style="background:${dotColor}; flex-shrink:0;"></span>
+                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px;">
+                            <strong>${active.role}:</strong> "${escapeHtml(active.fileName)}" <span style="color:var(--muted); font-size:11px;">${speedText}</span>
+                        </div>
+                    </div>
+                `;
+            } else if (isAllDone && (vol.movedOutTotalFiles > 0 || vol.movedInTotalFiles > 0)) {
+                activityHtml = `<span class="state-pill state-complete">Complete</span>`;
+            } else if (vol.movedOutTotalFiles === 0 && vol.movedInTotalFiles === 0) {
+                activityHtml = `<span class="state-text" style="color:var(--muted); font-size:12px;">Balanced</span>`;
             } else {
-                stateHtml = '<span class="state-text"><span class="status-dot dot-wait"></span>Idle</span>';
+                activityHtml = `<span class="state-text"><span class="status-dot dot-wait"></span>Idle</span>`;
             }
 
-            const filesDisplay = vol.totalFiles > 0
-                ? `${Number(vol.filesTransferred).toLocaleString()} / ${Number(vol.totalFiles).toLocaleString()}`
-                : Number(vol.filesTransferred).toLocaleString();
+            const remOutBytes = (vol.outgoingRemaining || []).reduce((sum, s) => sum + s.remainingBytes, 0);
+            const remInBytes = (vol.incomingRemaining || []).reduce((sum, s) => sum + s.remainingBytes, 0);
+            const remOutFiles = Math.max(0, (vol.movedOutTotalFiles || 0) - (vol.movedOutFiles || 0));
+            const remInFiles = Math.max(0, (vol.movedInTotalFiles || 0) - (vol.movedInFiles || 0));
 
-            const bytesDisplay = vol.totalBytes > 0
-                ? `${formatBytes(vol.bytesTransferred)} / ${formatBytes(vol.totalBytes)}`
-                : formatBytes(vol.bytesTransferred);
-
-            const speedDisplay = vol.status === 'Transferring' && vol.speedBps > 0
-                ? `${(vol.speedBps / (1024 * 1024)).toFixed(1)} MB/s`
-                : '-';
-
-            const rawPath = vol.currentFile || '-';
+            const diskLabel = vol.diskName && vol.diskName !== vol.alias ? ` <span style="color:var(--muted); font-weight:normal; font-size:11px;">(${escapeHtml(vol.diskName)})</span>` : '';
 
             return `
                 <tr>
-                    <td><strong>${escapeHtml(vol.alias)}</strong></td>
-                    <td>${stateHtml}</td>
-                    <td style="text-align:right; font-variant-numeric:tabular-nums;">${filesDisplay}</td>
-                    <td style="text-align:right; font-variant-numeric:tabular-nums;">${bytesDisplay}</td>
-                    <td style="text-align:right; font-variant-numeric:tabular-nums;">${speedDisplay}</td>
-                    <td style="min-width:0; width:100%;">
-                        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-family:monospace; font-size:11px; color:var(--muted);" title="${escapeHtml(rawPath)}">
-                            ${escapeHtml(rawPath)}
+                    <td>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span style="width:13px; height:13px; border-radius:50%; background:${color}; flex-shrink:0; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.1);"></span>
+                            <div>
+                                <strong style="font-size:13px;">${escapeHtml(vol.alias)}</strong>${diskLabel}
+                            </div>
+                        </div>
+                    </td>
+                    <td style="text-align:right; font-variant-numeric:tabular-nums; font-weight:600; color:var(--ink);">
+                        ${formatBytes(capacity)}
+                    </td>
+                    <td style="padding-left:12px; padding-right:12px;">
+                        <div class="dual-bar-container">
+                            <div class="bar-row">
+                                <span class="bar-stage-tag" title="Live volume state and remaining files moving out to other volumes">START (-OUT)</span>
+                                ${startBarHtml}
+                            </div>
+                            <div class="bar-row">
+                                <span class="bar-stage-tag" title="Target volume state and remaining files moving in from other volumes">END (+IN)</span>
+                                ${endBarHtml}
+                            </div>
+                        </div>
+                    </td>
+                    <td style="max-width:260px; overflow:hidden;">
+                        ${activityHtml}
+                    </td>
+                    <td style="text-align:right;">
+                        <div class="dual-val-container">
+                            <div class="val-row ${remOutBytes > 0 ? 'val-out' : 'val-dim'}" title="Remaining data to move out: ${formatBytes(remOutBytes)} (of ${formatBytes(vol.movedOutTotalBytes || 0)})">
+                                ${remOutBytes > 0 ? `-${formatBytes(remOutBytes)}` : (vol.movedOutTotalBytes > 0 ? '0 B' : '-')}
+                            </div>
+                            <div class="val-row ${remInBytes > 0 ? 'val-in' : 'val-dim'}" title="Remaining data to move in: ${formatBytes(remInBytes)} (of ${formatBytes(vol.movedInTotalBytes || 0)})">
+                                ${remInBytes > 0 ? `+${formatBytes(remInBytes)}` : (vol.movedInTotalBytes > 0 ? '0 B' : '-')}
+                            </div>
+                        </div>
+                    </td>
+                    <td style="text-align:right;">
+                        <div class="dual-val-container">
+                            <div class="val-row ${remOutFiles > 0 ? 'val-out' : 'val-dim'}" title="Remaining files to move out: ${remOutFiles} (of ${vol.movedOutTotalFiles || 0})">
+                                ${remOutFiles > 0 ? `-${remOutFiles.toLocaleString()}` : (vol.movedOutTotalFiles > 0 ? '0' : '-')}
+                            </div>
+                            <div class="val-row ${remInFiles > 0 ? 'val-in' : 'val-dim'}" title="Remaining files to move in: ${remInFiles} (of ${vol.movedInTotalFiles || 0})">
+                                ${remInFiles > 0 ? `+${remInFiles.toLocaleString()}` : (vol.movedInTotalFiles > 0 ? '0' : '-')}
+                            </div>
                         </div>
                     </td>
                 </tr>
             `;
         }).join('');
-    },
-
-    createSimulatedRunner(plan, { onProgress, onComplete, onError }) {
-        let isRunning = true;
-        let timerId = null;
-
-        // Extract items that require file movement
-        const volumes = (plan.volumes || []).map(v => ({
-            alias: v.alias,
-            status: 'Idle',
-            filesTransferred: 0,
-            totalFiles: 0,
-            bytesTransferred: 0,
-            totalBytes: 0,
-            speedBps: 0,
-            currentFile: '-'
-        }));
-        const volMap = new Map(volumes.map(v => [v.alias, v]));
-
-        // Gather planned transfer items
-        const transferItems = [];
-        let totalPlanBytes = 0;
-
-        (plan.placements || []).forEach(p => {
-            if (p.sizeMoved > 0) {
-                totalPlanBytes += p.sizeMoved;
-
-                if (p.files && p.files.length > 0) {
-                    p.files.forEach(f => {
-                        if (f.originalVolumeAlias !== f.destinationVolumeAlias) {
-                            transferItems.push({
-                                path: f.relativePath,
-                                size: f.sizeOnDisk || f.size || 1024,
-                                source: f.originalVolumeAlias,
-                                target: f.destinationVolumeAlias
-                            });
-                        }
-                    });
-                } else {
-                    // Synthesize chunks if file breakdown wasn't requested
-                    const targetAlias = p.targets && p.targets[0] ? p.targets[0].alias : volumes[0]?.alias;
-                    const sourceAlias = p.sources && p.sources[0] ? p.sources[0].alias : (volumes[1]?.alias || volumes[0]?.alias);
-                    const estChunkCount = Math.max(1, Math.min(20, Math.ceil(p.sizeMoved / (100 * 1024 * 1024))));
-                    const chunkSize = Math.ceil(p.sizeMoved / estChunkCount);
-                    for (let i = 0; i < estChunkCount; i++) {
-                        transferItems.push({
-                            path: `${p.relativePath}\\chunk_${i + 1}.dat`,
-                            size: chunkSize,
-                            source: sourceAlias,
-                            target: targetAlias
-                        });
-                    }
-                }
-            }
-        });
-
-        // Set volume totals
-        transferItems.forEach(item => {
-            const src = volMap.get(item.source);
-            if (src) {
-                src.totalBytes += item.size;
-                src.totalFiles += 1;
-            }
-            const dst = volMap.get(item.target);
-            if (dst && dst !== src) {
-                dst.totalBytes += item.size;
-                dst.totalFiles += 1;
-            }
-        });
-
-        const totalFiles = transferItems.length;
-        let currentItemIndex = 0;
-        let currentItemTransferred = 0;
-        let overallTransferredBytes = 0;
-        let lastTickTime = performance.now();
-
-        if (totalPlanBytes === 0 || transferItems.length === 0) {
-            // No files need to move!
-            setTimeout(() => {
-                volumes.forEach(v => { v.status = 'Complete'; v.currentFile = 'All files balanced'; });
-                if (onProgress) {
-                    onProgress({
-                        progressPercent: 100,
-                        transferredBytes: 0,
-                        totalBytes: 0,
-                        filesTransferred: 0,
-                        totalFiles: 0,
-                        speedBps: 0,
-                        volumes,
-                        activeFile: 'No transfers required'
-                    });
-                }
-                if (onComplete) onComplete({ volumes, totalTransferred: 0 });
-            }, 400);
-            return { cancel: () => {} };
-        }
-
-        // Target around 8-12 seconds total execution time for realistic feel
-        const estimatedBytesPerSecond = Math.max(50 * 1024 * 1024, Math.ceil(totalPlanBytes / 8));
-
-        function tick() {
-            if (!isRunning) return;
-
-            const now = performance.now();
-            const deltaSec = (now - lastTickTime) / 1000;
-            lastTickTime = now;
-
-            const bytesThisTick = Math.min(
-                totalPlanBytes - overallTransferredBytes,
-                Math.ceil(estimatedBytesPerSecond * deltaSec)
-            );
-
-            let remainingTickBytes = bytesThisTick;
-            let activeItem = transferItems[currentItemIndex];
-
-            while (remainingTickBytes > 0 && currentItemIndex < transferItems.length) {
-                activeItem = transferItems[currentItemIndex];
-                const itemNeeded = activeItem.size - currentItemTransferred;
-                const take = Math.min(remainingTickBytes, itemNeeded);
-
-                currentItemTransferred += take;
-                overallTransferredBytes += take;
-                remainingTickBytes -= take;
-
-                // Update volume stats
-                const src = volMap.get(activeItem.source);
-                const dst = volMap.get(activeItem.target);
-                if (src) {
-                    src.bytesTransferred += take;
-                    src.status = 'Transferring';
-                    src.currentFile = activeItem.path;
-                }
-                if (dst) {
-                    dst.bytesTransferred += take;
-                    dst.status = 'Transferring';
-                    dst.currentFile = activeItem.path;
-                }
-
-                if (currentItemTransferred >= activeItem.size) {
-                    if (src) src.filesTransferred += 1;
-                    if (dst && dst !== src) dst.filesTransferred += 1;
-                    currentItemIndex++;
-                    currentItemTransferred = 0;
-                }
-            }
-
-            // Update speeds
-            const speed = deltaSec > 0 ? (bytesThisTick / deltaSec) : 0;
-            volumes.forEach(v => {
-                if (v.status === 'Transferring') {
-                    v.speedBps = speed;
-                } else {
-                    v.speedBps = 0;
-                }
-            });
-
-            const pct = totalPlanBytes > 0
-                ? Math.min(100, Math.round((overallTransferredBytes / totalPlanBytes) * 100))
-                : 100;
-
-            if (onProgress) {
-                onProgress({
-                    progressPercent: pct,
-                    transferredBytes: overallTransferredBytes,
-                    totalBytes: totalPlanBytes,
-                    filesTransferred: currentItemIndex,
-                    totalFiles,
-                    speedBps: speed,
-                    volumes,
-                    activeFile: activeItem ? activeItem.path : 'Finishing transfers...'
-                });
-            }
-
-            if (currentItemIndex >= transferItems.length || overallTransferredBytes >= totalPlanBytes) {
-                volumes.forEach(v => {
-                    v.status = 'Complete';
-                    v.speedBps = 0;
-                    v.currentFile = 'Completed';
-                    v.bytesTransferred = v.totalBytes;
-                    v.filesTransferred = v.totalFiles;
-                });
-                if (onProgress) {
-                    onProgress({
-                        progressPercent: 100,
-                        transferredBytes: totalPlanBytes,
-                        totalBytes: totalPlanBytes,
-                        filesTransferred: totalFiles,
-                        totalFiles,
-                        speedBps: 0,
-                        volumes,
-                        activeFile: 'All transfers finished'
-                    });
-                }
-                if (onComplete) onComplete({ volumes, totalTransferred: totalPlanBytes });
-                return;
-            }
-
-            timerId = setTimeout(tick, 100);
-        }
-
-        timerId = setTimeout(tick, 100);
-
-        return {
-            cancel() {
-                isRunning = false;
-                if (timerId) clearTimeout(timerId);
-                volumes.forEach(v => {
-                    if (v.status === 'Transferring') v.status = 'Idle';
-                    v.speedBps = 0;
-                });
-            }
-        };
     }
 };

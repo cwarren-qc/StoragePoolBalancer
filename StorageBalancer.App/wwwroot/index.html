@@ -51,15 +51,9 @@
         <!-- Top Action & Title Area -->
         <div class="hero-bar">
             <div class="hero-title">
-                <p>Run automated end-to-end pool balancing: Scan volumes, simulate placements, and execute the balancing plan.</p>
+                <p>Run automated end-to-end pool balancing: Scan volumes, plan placements, and execute the balancing plan.</p>
             </div>
             <div class="hero-actions">
-                <div style="display:flex; flex-direction:column; gap:4px;">
-                    <label for="snapshot-select" style="font-size:11px; font-weight:700; color:var(--muted); text-transform:uppercase;">Snapshot / Source</label>
-                    <select id="snapshot-select" style="padding:7px 10px; border:1px solid var(--line); border-radius:6px; background:var(--surface); font-size:13px; min-width:260px; color:var(--ink);">
-                        <option value="">-- Live Pool Scan (Default) --</option>
-                    </select>
-                </div>
                 <a href="/configuration.html" class="btn" title="Open and edit pool volumes, paths, and placement rules">
                     ⚙️ Edit Configuration
                 </a>
@@ -173,16 +167,16 @@
                     </div>
                 </div>
 
-                <!-- Execution table matching Scan progress table design -->
-                <table class="scan-table" id="exec-table">
+                <!-- Execution table with live dual bars and active disk indicator -->
+                <table class="plan-table" id="exec-table" style="width:100%; margin-top:10px;">
                     <thead>
                         <tr>
-                            <th style="width: 70px;" title="Volume participating in balancing moves">Volume</th>
-                            <th style="width: 120px;" title="Transfer status: Transferring, Idle, or Complete">State</th>
-                            <th style="width: 90px; text-align:right;" title="Number of files transferred">Files</th>
-                            <th style="width: 130px; text-align:right;" title="Amount of data transferred">Data Transferred</th>
-                            <th style="width: 90px; text-align:right;" title="Current transfer throughput">Speed</th>
-                            <th style="width: auto; padding-left: 16px;" title="Active file being moved">Current File</th>
+                            <th style="width: 110px;" title="Volume and physical disk participating in balancing">Volume</th>
+                            <th style="width: 80px; text-align:right;" title="Usable capacity of the volume">Capacity</th>
+                            <th style="width: auto; min-width: 260px; padding-left: 12px; padding-right: 12px;" title="Visual progression of outgoing data (-OUT) and incoming data (+IN) absorbing into the volume">START (-OUT) vs END (+IN)</th>
+                            <th style="width: 240px;" title="Live disk reading or writing activity with throughput">Current Activity</th>
+                            <th style="width: 140px; text-align:right;" title="Remaining data to be moved out (-OUT) and moved in (+IN)">Data Remaining</th>
+                            <th style="width: 90px; text-align:right;" title="Remaining files to be moved out (-OUT) and moved in (+IN)">Files Remaining</th>
                         </tr>
                     </thead>
                     <tbody id="exec-tbody">
@@ -261,17 +255,6 @@
                 }
             } catch (e) {}
 
-            // Populate Snapshots dropdown
-            try {
-                const snaps = await Balancer.plan.loadSnapshots(snapshotSelect);
-                if (snaps && snaps.length > 0) {
-                    snapshotSelect.innerHTML = '<option value="">-- Live Pool Scan (Default) --</option>' +
-                        snaps.map(s => `<option value="${Balancer.escapeHtml(s.name)}">${Balancer.escapeHtml(s.name)} (${new Date(s.lastModifiedUtc).toLocaleString()})</option>`).join('');
-                } else {
-                    snapshotSelect.innerHTML = '<option value="">-- Live Pool Scan (Default) --</option>';
-                }
-            } catch (e) {}
-
             // Check if scan is currently running on server
             try {
                 const status = await Balancer.scan.fetchStatus();
@@ -290,17 +273,6 @@
                     }
                 }
             } catch (e) {}
-
-            snapshotSelect.addEventListener('change', () => {
-                const val = snapshotSelect.value.trim();
-                if (val) {
-                    document.getElementById('step-desc-1').textContent = `Using: ${val}`;
-                    scanSubtitle.textContent = `Snapshot selected: ${val}`;
-                } else {
-                    document.getElementById('step-desc-1').textContent = 'Ready';
-                    scanSubtitle.textContent = 'Not started';
-                }
-            });
         }
 
         async function onScanFinishedAfterReattach(status) {
@@ -319,48 +291,32 @@
             btnStart.style.display = 'none';
             btnCancel.style.display = 'inline-flex';
             btnCancel.disabled = false;
-            snapshotSelect.disabled = true;
 
-            const chosenSnapshot = snapshotSelect.value.trim();
+            // Full end-to-end run: Live Scan first
+            const now = new Date();
+            const snapPad = n => String(n).padStart(2, '0');
+            const snapName = `Balancing_${now.getFullYear()}-${snapPad(now.getMonth() + 1)}-${snapPad(now.getDate())}_${snapPad(now.getHours())}-${snapPad(now.getMinutes())}-${snapPad(now.getSeconds())}`;
+            appState.activeSnapshotName = snapName;
 
-            if (chosenSnapshot) {
-                // ⚡ FAST-TRACK: Use selected snapshot, skip 10-minute scan!
-                appState.activeSnapshotName = chosenSnapshot;
-                setStepState(1, 'completed', `Loaded: ${chosenSnapshot}`);
-                scanSubtitle.textContent = `Loaded existing snapshot: ${chosenSnapshot}`;
-                scanTbody.innerHTML = `<tr><td colspan="6" style="text-align:center; padding:18px; color:var(--deep); background:#eaf2ed; border-radius:4px;">
-                    <strong>⚡ Pre-scanned Snapshot Selected:</strong> Using snapshot <code>${Balancer.escapeHtml(chosenSnapshot)}</code>. Live scan was skipped.
-                </td></tr>`;
+            setStepState(1, 'active', 'Scanning...');
+            setStepState(2, 'pending', 'Waiting for scan');
+            setStepState(3, 'pending', 'Waiting for plan');
+            document.getElementById('details-scan').open = true;
 
-                // Proceed directly to Planning and Execution
-                await runPlanningAndExecution(chosenSnapshot);
-            } else {
-                // Full end-to-end run: Live Scan first
-                const now = new Date();
-                const snapPad = n => String(n).padStart(2, '0');
-                const snapName = `Balancing_${now.getFullYear()}-${snapPad(now.getMonth() + 1)}-${snapPad(now.getDate())}_${snapPad(now.getHours())}-${snapPad(now.getMinutes())}-${snapPad(now.getSeconds())}`;
-                appState.activeSnapshotName = snapName;
+            try {
+                appState.currentStep = 1;
+                scanSubtitle.textContent = 'Scanning volumes in progress...';
+                await Balancer.scan.startScan(snapName);
+                await pollScanUntilComplete();
 
-                setStepState(1, 'active', 'Scanning...');
-                setStepState(2, 'pending', 'Waiting for scan');
-                setStepState(3, 'pending', 'Waiting for plan');
-                document.getElementById('details-scan').open = true;
+                if (!appState.isRunning) return;
+                setStepState(1, 'completed', 'Completed');
 
-                try {
-                    appState.currentStep = 1;
-                    scanSubtitle.textContent = 'Scanning volumes in progress...';
-                    await Balancer.scan.startScan(snapName);
-                    await pollScanUntilComplete();
-
-                    if (!appState.isRunning) return;
-                    setStepState(1, 'completed', 'Completed');
-
-                    await runPlanningAndExecution(snapName);
-                } catch (err) {
-                    showNotice(err.message || 'Scan encountered an error.', 'error');
-                    setStepState(1, 'pending', 'Failed');
-                    stopProcessUI();
-                }
+                await runPlanningAndExecution(snapName);
+            } catch (err) {
+                showNotice(err.message || 'Scan encountered an error.', 'error');
+                setStepState(1, 'pending', 'Failed');
+                stopProcessUI();
             }
         }
 
@@ -387,7 +343,7 @@
                 execSubtitle.textContent = 'Executing file balancing plan...';
                 execSummaryBar.style.display = 'flex';
 
-                await runExecution(plan);
+                await runExecution(snapshotName, plan);
 
                 setStepState(3, 'completed', 'Completed');
                 execSubtitle.textContent = 'Finished';
@@ -427,26 +383,83 @@
             });
         }
 
-        function runExecution(plan) {
-            return new Promise((resolve) => {
-                appState.activeRunner = Balancer.execution.createSimulatedRunner(plan, {
-                    onProgress: (p) => {
-                        execPct.textContent = `${p.progressPercent}%`;
-                        execProgressFill.style.width = `${p.progressPercent}%`;
-                        execTransferred.textContent = `${Balancer.formatBytes(p.transferredBytes)} / ${Balancer.formatBytes(p.totalBytes)}`;
-                        execFiles.textContent = `${p.filesTransferred} / ${p.totalFiles}`;
-                        execSpeed.textContent = p.speedBps > 0 ? `${(p.speedBps / (1024 * 1024)).toFixed(1)} MB/s` : '0 MB/s';
+        function runExecution(snapshotName, plan) {
+            const volumeColors = Balancer.getVolumeColorMap(plan?.volumes || appState.config?.volumes || []);
+            appState.volumeColors = volumeColors;
 
-                        Balancer.execution.renderTable(p.volumes, execTbody);
-                    },
-                    onComplete: (res) => {
-                        execPct.textContent = '100%';
-                        execProgressFill.style.width = '100%';
-                        execSpeed.textContent = '0 MB/s';
-                        Balancer.execution.renderTable(res.volumes, execTbody);
-                        resolve();
+            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
+            execSummaryBar.style.display = 'flex';
+            execPct.textContent = 'Preparing...';
+            execTransferred.textContent = 'Analyzing...';
+            execFiles.textContent = 'Analyzing...';
+            execSpeed.textContent = '0 MB/s';
+            execProgressFill.style.width = '0%';
+            execTbody.innerHTML = `
+                <tr>
+                    <td colspan="6" style="text-align:center; padding:32px 16px; color:var(--deep); background:#eaf2ed; border-radius:6px;">
+                        <div style="display:flex; align-items:center; justify-content:center; gap:10px; font-size:14px; font-weight:700;">
+                            <span class="spinner" style="width:16px; height:16px;"></span>
+                            <span>Preparing execution... Computing file placements and transfer queues...</span>
+                        </div>
+                        <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+                            Analyzing pool structure and balancing rules across volumes. Moves will begin in a few moments.
+                        </div>
+                    </td>
+                </tr>`;
+
+            return new Promise(async (resolve, reject) => {
+                try {
+                    await Balancer.execution.start({
+                        snapshotName,
+                        isSimulation: false
+                    });
+                } catch (startErr) {
+                    return reject(startErr);
+                }
+
+                async function pollStatus() {
+                    if (!appState.isRunning) return resolve();
+
+                    try {
+                        const status = await Balancer.execution.fetchStatus();
+
+                        const isPrep = status.phase === 'Preparing' || !status.volumes || status.volumes.length === 0;
+                        if (isPrep) {
+                            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
+                            execPct.textContent = 'Preparing...';
+                            execTransferred.textContent = 'Analyzing...';
+                            execFiles.textContent = 'Analyzing...';
+                            execSpeed.textContent = '0 MB/s';
+                        } else {
+                            execSubtitle.textContent = 'Executing file balancing...';
+                            const pct = status.progressPercent || 0;
+                            execPct.textContent = `${pct.toFixed(0)}%`;
+                            execProgressFill.style.width = `${pct}%`;
+                            execTransferred.textContent = `${Balancer.formatBytes(status.transferredBytes)} / ${Balancer.formatBytes(status.totalBytes)}`;
+                            execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
+                            execSpeed.textContent = status.throughputBps > 0 ? `${(status.throughputBps / (1024 * 1024)).toFixed(1)} MB/s` : '0 MB/s';
+                        }
+
+                        Balancer.execution.renderTable(status, execTbody, volumeColors);
+
+                        if (status.isRunning) {
+                            appState.pollTimer = setTimeout(pollStatus, 1000);
+                        } else {
+                            if (status.error) {
+                                reject(new Error(`Execution failed: ${status.error}`));
+                            } else {
+                                execPct.textContent = '100%';
+                                execProgressFill.style.width = '100%';
+                                execSpeed.textContent = '0 MB/s';
+                                resolve();
+                            }
+                        }
+                    } catch (pollErr) {
+                        reject(pollErr);
                     }
-                });
+                }
+
+                pollStatus();
             });
         }
 
@@ -458,8 +471,8 @@
             if (appState.currentStep === 1) {
                 try { await Balancer.scan.cancelScan(); } catch (e) {}
             }
-            if (appState.currentStep === 3 && appState.activeRunner) {
-                appState.activeRunner.cancel();
+            if (appState.currentStep === 3) {
+                try { await Balancer.execution.cancel(); } catch (e) {}
             }
 
             if (appState.pollTimer) clearTimeout(appState.pollTimer);
@@ -476,7 +489,6 @@
             btnCancel.style.display = 'none';
             btnCancel.disabled = false;
             btnCancel.textContent = 'Cancel Process';
-            snapshotSelect.disabled = false;
         }
 
         btnStart.addEventListener('click', startProcess);

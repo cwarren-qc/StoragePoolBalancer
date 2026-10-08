@@ -85,7 +85,7 @@
         .sub-details { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 20px; background: #fffefa; }
         .sub-details > summary { padding: 12px 16px; font-size: 14px; background: color-mix(in srgb, var(--paper) 60%, transparent); border-radius: 6px; }
         .sub-details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: 1px solid var(--line); }
-        .sub-details:not([open]) > summary .btn, .sub-details:not([open]) > summary .drivepool-toggle { display: none !important; }
+        .sub-details:not([open]) > summary .btn, .sub-details:not([open]) > summary .drivepool-toggle, .sub-details:not([open]) > summary .plan-stayed-intact-toggle { display: none !important; }
         .sub-content { padding: 16px; }
 
         /* Ordering Buttons */
@@ -186,6 +186,28 @@
                     </div>
                 </details>
 
+                <!-- EXECUTION & SAFETY SUB-SECTION -->
+                <details class="sub-details" open>
+                    <summary>
+                        <span title="Settings controlling balancing execution and safe file transfer workers">Execution & Safety Settings</span>
+                    </summary>
+                    <div class="sub-content">
+                        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:16px;">
+                            <div class="field">
+                                <div class="field-header" title="Maximum concurrent threads / worker tasks to move files concurrently during live execution (subject to physical disk locks)">Live Execution Threads</div>
+                                <input type="number" id="cfg-max-threads" min="1" max="16" value="2">
+                            </div>
+                            <div class="field" style="display:flex; flex-direction:column; justify-content:center;">
+                                <label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; cursor:pointer;" title="Re-read file from destination stream after copying to verify bit-level checksum match">
+                                    <input type="checkbox" id="cfg-verify-copies" checked style="width:16px; height:16px;">
+                                    Verify File Copies (Checksum)
+                                </label>
+                                <div style="font-size:11px; color:var(--muted); margin-top:4px;">Stream SHA-256 verification before source deletion</div>
+                            </div>
+                        </div>
+                    </div>
+                </details>
+
                 <div id="config-notice" class="notice"></div>
 
                 <div style="display:flex; justify-content:flex-end; margin-top:20px;">
@@ -194,10 +216,10 @@
             </div>
         </details>
 
-        <!-- STATE SCANNER -->
+        <!-- STATE SCAN -->
         <details id="details-scan">
             <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-                <div class="summary-title">🔍 State Scanner <span class="summary-subtitle" id="scan-subtitle"></span></div>
+                <div class="summary-title">🔍 State Scan <span class="summary-subtitle" id="scan-subtitle"></span></div>
                 <div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">
                     <input type="text" id="scan-name" placeholder="Snapshot Name (Optional)" title="Optional custom name for this scan snapshot. Defaults to date and time if empty" style="width:220px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;">
                     <button class="btn danger" id="btn-scan-cancel" onclick="event.stopPropagation(); cancelScan()" style="display:none;" title="Cancel the currently running pool scan">Cancel Scan</button>
@@ -224,12 +246,12 @@
             </div>
         </details>
 
-        <!-- SIMULATION & PREVIEW -->
+        <!-- PLACEMENT PLANNING -->
         <details id="details-plan">
             <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-                <div class="summary-title">📊 Simulation & Preview <span class="summary-subtitle" id="plan-subtitle"></span></div>
+                <div class="summary-title">📊 Placement Planning <span class="summary-subtitle" id="plan-subtitle"></span></div>
                 <div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">
-                    <select id="plan-snapshot-select" style="max-width:280px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;"><option value="">Loading snapshots...</option></select>
+                    <select id="plan-snapshot-select" onchange="state.activePlanSnapshot = null;" style="max-width:280px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;"><option value="">Loading snapshots...</option></select>
                     <button class="btn primary" id="btn-plan-generate" onclick="event.stopPropagation(); document.getElementById('details-plan').open = true; generatePlan();">Generate Preview</button>
                 </div>
             </summary>
@@ -239,15 +261,97 @@
                 <div id="plan-results" style="margin-top:20px;"></div>
             </div>
         </details>
+
+        <!-- PLAN EXECUTION (SIMULATION) -->
+        <details id="details-exec">
+            <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                <div class="summary-title" style="display:flex; align-items:center; gap:10px;">
+                    <span>⚡ Plan Execution</span>
+                    <span style="background:#b65b38; color:white; font-size:10px; font-weight:800; padding:2px 8px; border-radius:4px; letter-spacing:0.5px;">SIMULATED ONLY</span>
+                    <span class="summary-subtitle" id="exec-subtitle"></span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">
+                    <button class="btn danger" id="btn-exec-cancel" onclick="event.stopPropagation(); cancelSimExecution()" style="display:none;" title="Cancel currently running simulation">Cancel Simulation</button>
+                    <button class="btn primary" id="btn-exec-start" onclick="event.stopPropagation(); document.getElementById('details-exec').open = true; startSimExecution();" title="Run simulated file balancing execution">▶ Run Simulation</button>
+                </div>
+            </summary>
+            <div class="content">
+                <!-- Simulation Settings Toolbar -->
+                <div class="toolbar" style="margin-bottom:16px; background:#fbfcf9; border:1px solid var(--line); border-radius:6px; padding:12px 16px; display:flex; flex-wrap:wrap; gap:16px; align-items:flex-end;">
+                    <div class="field" style="flex:1; min-width:220px; align-self:center;">
+                        <span style="font-size:12px; color:var(--muted);">
+                            Uses snapshot selected in <strong>Placement Planning</strong> above.
+                        </span>
+                    </div>
+                    <div class="field" style="width:160px;">
+                        <div class="field-header" title="Maximum concurrent worker threads for this simulation">Nb of threads for Sim</div>
+                        <input type="number" id="sim-threads" min="1" max="16" value="2">
+                    </div>
+                    <div class="field" style="width:180px;">
+                        <div class="field-header" title="Simulated time scale for file balancing">Sim Duration</div>
+                        <select id="sim-duration">
+                            <option value="30">30 seconds</option>
+                            <option value="60">1 minute</option>
+                            <option value="120" selected>2 minutes (Default)</option>
+                            <option value="300">5 minutes</option>
+                            <option value="600">10 minutes</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Summary bar with progress stats -->
+                <div class="exec-summary-bar" id="exec-summary-bar" style="display:none;">
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Progress</span>
+                        <span class="exec-stat-value" id="exec-pct">0%</span>
+                    </div>
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Transferred</span>
+                        <span class="exec-stat-value" id="exec-transferred">0 B / 0 B</span>
+                    </div>
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Files</span>
+                        <span class="exec-stat-value" id="exec-files">0 / 0</span>
+                    </div>
+                    <div class="exec-stat">
+                        <span class="exec-stat-label">Transfer Speed</span>
+                        <span class="exec-stat-value" id="exec-speed">0 MB/s</span>
+                    </div>
+                    <div class="exec-progress-container">
+                        <div class="exec-progress-fill" id="exec-progress-fill"></div>
+                    </div>
+                </div>
+
+                <div id="exec-notice" class="notice"></div>
+
+                <!-- Execution table with live dual bars and active disk indicator -->
+                <table class="plan-table" id="exec-table" style="width:100%; margin-top:10px;">
+                    <thead>
+                        <tr>
+                            <th style="width: 110px;" title="Volume and physical disk participating in balancing">Volume</th>
+                            <th style="width: 80px; text-align:right;" title="Usable capacity of the volume">Capacity</th>
+                            <th style="width: auto; min-width: 260px; padding-left: 12px; padding-right: 12px;" title="Visual progression of outgoing data (-OUT) and incoming data (+IN) absorbing into the volume">START (-OUT) vs END (+IN)</th>
+                            <th style="width: 240px;" title="Live disk reading or writing activity with throughput">Current Activity</th>
+                            <th style="width: 140px; text-align:right;" title="Remaining data to be moved out (-OUT) and moved in (+IN)">Data Remaining</th>
+                            <th style="width: 90px; text-align:right;" title="Remaining files to be moved out (-OUT) and moved in (+IN)">Files Remaining</th>
+                        </tr>
+                    </thead>
+                    <tbody id="exec-tbody">
+                        <tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">No simulation running. Select a snapshot and click 'Run Simulation'.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </details>
     </main>
 
     <script src="/shared-scanner.js"></script>
     <script src="/shared-planner.js"></script>
+    <script src="/shared-executer.js"></script>
     <script>
         const escapeHtml = Balancer.escapeHtml;
         const formatBytes = Balancer.formatBytes;
 
-        let state = { config: { volumes: [], filePlacementRules: [] }, scanPolling: false };
+        let state = { config: { volumes: [], filePlacementRules: [] }, scanPolling: false, activePlanSnapshot: null };
         let draggedRuleIndex = null;
         let activePlan = null;
         let placementSortCol = 'path';
@@ -270,6 +374,8 @@
 
                 document.getElementById('cfg-snapshot-dir').value = state.config.snapshotsFolder || '';
                 document.getElementById('cfg-drivepool').checked = state.config.drivePoolMode;
+                document.getElementById('cfg-max-threads').value = state.config.maxExecutionThreads || 2;
+                document.getElementById('cfg-verify-copies').checked = state.config.verifyCopies !== false;
 
                 renderVolumes();
                 renderRules();
@@ -352,6 +458,10 @@
                 consolidate: false,
                 allowedVolumeAliases: unmatchedPills
             };
+
+            // Save execution settings
+            state.config.maxExecutionThreads = parseInt(document.getElementById('cfg-max-threads')?.value) || 2;
+            state.config.verifyCopies = document.getElementById('cfg-verify-copies')?.checked !== false;
         }
 
         function addVolume() {
@@ -706,6 +816,7 @@
                 if(!res.ok) throw new Error(data.Error || data.error || data.title || `Failed to save configuration (Status ${res.status}).`);
 
                 showConfigNotice("Configuration saved successfully.", false);
+                state.activePlanSnapshot = null;
                 await loadConfig();
             } catch (err) {
                 showConfigNotice(err.message, true);
@@ -789,7 +900,8 @@
 
         // ================= PREVIEW =================
         async function loadSnapshots() {
-            await Balancer.plan.loadSnapshots(document.getElementById('plan-snapshot-select'));
+            const planSelect = document.getElementById('plan-snapshot-select');
+            await Balancer.plan.loadSnapshots(planSelect);
         }
 
         async function generatePlan() {
@@ -811,11 +923,13 @@
 
             try {
                 const plan = await Balancer.plan.generatePlan(snapName);
+                state.activePlanSnapshot = snapName;
                 notice.innerHTML = "";
                 notice.className = "notice";
                 if (subtitle) subtitle.textContent = `Generated: ${new Date().toLocaleTimeString()}`;
                 Balancer.plan.renderPlan(plan, results, { sectionsOpenByDefault: true });
             } catch (err) {
+                state.activePlanSnapshot = null;
                 notice.textContent = err.message;
                 notice.className = "notice error";
                 if (subtitle) subtitle.textContent = "";
@@ -825,10 +939,183 @@
             }
         }
 
+        // ================= SIMULATED EXECUTION =================
+        let simPollTimer = null;
+
+        async function fetchSimExecutionStatus() {
+            try {
+                const status = await Balancer.execution.fetchStatus();
+                renderSimExecutionStatus(status);
+                if (status.isRunning) {
+                    if (simPollTimer) clearTimeout(simPollTimer);
+                    simPollTimer = setTimeout(fetchSimExecutionStatus, 1000);
+                } else {
+                    if (simPollTimer) { clearTimeout(simPollTimer); simPollTimer = null; }
+                }
+            } catch (err) {
+                // Ignore poll errors
+            }
+        }
+
+        function renderSimExecutionStatus(status) {
+            const btnStart = document.getElementById('btn-exec-start');
+            const btnCancel = document.getElementById('btn-exec-cancel');
+            const subtitle = document.getElementById('exec-subtitle');
+            const summaryBar = document.getElementById('exec-summary-bar');
+            const execTbody = document.getElementById('exec-tbody');
+            const execPct = document.getElementById('exec-pct');
+            const execTransferred = document.getElementById('exec-transferred');
+            const execFiles = document.getElementById('exec-files');
+            const execSpeed = document.getElementById('exec-speed');
+            const execProgressFill = document.getElementById('exec-progress-fill');
+            const notice = document.getElementById('exec-notice');
+
+            btnStart.style.display = status.isRunning ? 'none' : 'inline-flex';
+            btnCancel.style.display = status.isRunning ? 'inline-flex' : 'none';
+            btnCancel.disabled = Boolean(status.isCancellationRequested);
+            btnCancel.textContent = status.isCancellationRequested ? 'Cancelling...' : 'Cancel Simulation';
+
+            const volumeColors = Balancer.getVolumeColorMap(state.config.volumes);
+
+            if (status.isRunning) {
+                summaryBar.style.display = 'flex';
+                const isPrep = status.phase === 'Preparing' || !status.volumes || status.volumes.length === 0;
+                if (isPrep) {
+                    subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
+                    execPct.textContent = 'Preparing...';
+                    execTransferred.textContent = 'Analyzing...';
+                    execFiles.textContent = 'Analyzing...';
+                    execSpeed.textContent = '0 MB/s';
+                } else {
+                    subtitle.textContent = status.isCancellationRequested ? 'Cancelling simulation...' : 'Simulation running...';
+                    const pct = status.progressPercent || 0;
+                    execPct.textContent = `${pct.toFixed(0)}%`;
+                    execProgressFill.style.width = `${pct}%`;
+                    execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
+                    execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
+                    execSpeed.textContent = status.throughputBps > 0 ? `${(status.throughputBps / (1024 * 1024)).toFixed(1)} MB/s` : '0 MB/s';
+                }
+                Balancer.execution.renderTable(status, execTbody, volumeColors);
+            } else if (status.completedAt) {
+                summaryBar.style.display = 'flex';
+                const pct = status.progressPercent || 0;
+                execPct.textContent = `${pct.toFixed(0)}%`;
+                execProgressFill.style.width = `${pct}%`;
+                execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
+                execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
+                execSpeed.textContent = '0 MB/s';
+                Balancer.execution.renderTable(status, execTbody, volumeColors);
+
+                if (status.error) {
+                    subtitle.textContent = 'Simulation stopped with error';
+                    notice.textContent = status.error;
+                    notice.className = 'notice error';
+                } else {
+                    subtitle.textContent = `Completed at ${new Date(status.completedAt).toLocaleTimeString()}`;
+                    notice.textContent = 'Simulation finished successfully.';
+                    notice.className = 'notice success';
+                }
+            } else {
+                subtitle.textContent = '';
+            }
+        }
+
+        async function startSimExecution() {
+            const snapSelect = document.getElementById('plan-snapshot-select');
+            const snapName = snapSelect ? snapSelect.value : '';
+            const notice = document.getElementById('exec-notice');
+            notice.textContent = '';
+            notice.className = 'notice';
+
+            if (!snapName) {
+                notice.textContent = 'Please select a snapshot in Placement Planning first.';
+                notice.className = 'notice error';
+                return;
+            }
+
+            const threads = parseInt(document.getElementById('sim-threads').value) || 2;
+            const duration = parseInt(document.getElementById('sim-duration').value) || 120;
+            const planDetails = document.getElementById('details-plan');
+            const execDetails = document.getElementById('details-exec');
+
+            // If placement plan has not been generated yet for this snapshot, generate it first and uncollapse Placement Planning
+            if (state.activePlanSnapshot !== snapName) {
+                if (planDetails) planDetails.open = true;
+                await generatePlan();
+                if (state.activePlanSnapshot !== snapName) {
+                    return; // Plan generation encountered an error
+                }
+            }
+
+            if (execDetails) execDetails.open = true;
+
+            const subtitle = document.getElementById('exec-subtitle');
+            const summaryBar = document.getElementById('exec-summary-bar');
+            const execPct = document.getElementById('exec-pct');
+            const execTransferred = document.getElementById('exec-transferred');
+            const execFiles = document.getElementById('exec-files');
+            const execSpeed = document.getElementById('exec-speed');
+            const execProgressFill = document.getElementById('exec-progress-fill');
+            const execTbody = document.getElementById('exec-tbody');
+            const btnStart = document.getElementById('btn-exec-start');
+            const btnCancel = document.getElementById('btn-exec-cancel');
+
+            // Immediate UI feedback on button click
+            btnStart.style.display = 'none';
+            btnCancel.style.display = 'inline-flex';
+            summaryBar.style.display = 'flex';
+            subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
+            execPct.textContent = 'Preparing...';
+            execTransferred.textContent = 'Analyzing...';
+            execFiles.textContent = 'Analyzing...';
+            execSpeed.textContent = '0 MB/s';
+            execProgressFill.style.width = '0%';
+            execTbody.innerHTML = `
+                <tr>
+                    <td colspan="6" style="text-align:center; padding:32px 16px; color:var(--deep); background:#eaf2ed; border-radius:6px;">
+                        <div style="display:flex; align-items:center; justify-content:center; gap:10px; font-size:14px; font-weight:700;">
+                            <span class="spinner" style="width:16px; height:16px;"></span>
+                            <span>Preparing execution... Computing file placements and transfer queues...</span>
+                        </div>
+                        <div style="font-size:12px; color:var(--muted); margin-top:6px;">
+                            Analyzing pool structure and balancing rules across volumes. Simulation will begin in a few moments.
+                        </div>
+                    </td>
+                </tr>`;
+
+            try {
+                await Balancer.execution.start({
+                    snapshotName: snapName || null,
+                    isSimulation: true,
+                    simulationDurationSeconds: duration,
+                    maxThreads: threads
+                });
+                await fetchSimExecutionStatus();
+            } catch (err) {
+                btnStart.style.display = 'inline-flex';
+                btnCancel.style.display = 'none';
+                subtitle.textContent = '';
+                notice.textContent = err.message;
+                notice.className = 'notice error';
+            }
+        }
+
+        async function cancelSimExecution() {
+            try {
+                await Balancer.execution.cancel();
+                await fetchSimExecutionStatus();
+            } catch (err) {
+                const notice = document.getElementById('exec-notice');
+                notice.textContent = err.message;
+                notice.className = 'notice error';
+            }
+        }
+
         window.addEventListener('DOMContentLoaded', async () => {
             await loadConfig();
             await fetchScanStatus();
             await loadSnapshots();
+            await fetchSimExecutionStatus();
         });
     </script>
 </body>

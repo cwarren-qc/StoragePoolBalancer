@@ -15,6 +15,9 @@ public class AppConfig
     public SpecialRuleConfig Duplicates { get; set; } = new();
     public SpecialRuleConfig Filler { get; set; } = new();
     public SpecialRuleConfig Unmatched { get; set; } = new();
+    public int MaxExecutionThreads { get; set; } = 2;
+    public bool VerifyCopies { get; set; } = true;
+    public int DefaultSimulationDurationSeconds { get; set; } = 120;
 }
 
 public class VolumeConfig

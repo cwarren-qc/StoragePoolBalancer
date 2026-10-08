@@ -397,3 +397,8 @@ th[title], .field-header[title], label[title], .reason-badge[title] { cursor: he
     );
 }
 
+.sub-details:not([open]) > summary .plan-stayed-intact-toggle,
+details:not([open]) > summary .plan-stayed-intact-toggle {
+    display: none !important;
+}
+
