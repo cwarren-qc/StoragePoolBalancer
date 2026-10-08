@@ -136,14 +136,11 @@
 
     <main class="shell">
         <!-- CONFIGURATION -->
-        <details id="details-config">
+        <details id="details-config" open>
             <summary>
                 <div class="summary-title">⚙️ Configuration</div>
-                <button class="btn primary" id="btn-save-config" onclick="event.preventDefault(); saveConfig();">Save Configuration</button>
             </summary>
             <div class="content">
-                <div id="config-notice" class="notice"></div>
-
                 <div class="toolbar" style="margin-bottom:24px;">
                     <div style="display:flex; gap:16px; width:100%;">
                         <div class="field" style="flex:1;">
@@ -188,6 +185,11 @@
                     </div>
                 </details>
 
+                <div id="config-notice" class="notice"></div>
+
+                <div style="display:flex; justify-content:flex-end; margin-top:20px;">
+                    <button class="btn primary" id="btn-save-config" onclick="saveConfig();" style="padding:10px 22px; font-size:13px;" title="Save all changes to volumes, rules, and pool settings">Save Configuration</button>
+                </div>
             </div>
         </details>
 
