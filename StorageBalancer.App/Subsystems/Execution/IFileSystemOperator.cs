@@ -12,6 +12,10 @@ public interface IFileSystemOperator
         Action<long> onBytesTransferred,
         CancellationToken ct);
 
+    Task EnsureFolderExistsAsync(
+        string folderPath,
+        CancellationToken ct);
+
     Task DeleteFolderAsync(
         FolderCleanupTask task,
         CancellationToken ct);

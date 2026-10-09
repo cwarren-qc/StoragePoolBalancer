@@ -149,6 +149,24 @@ window.Balancer.plan = {
                     </table>
                 </div>
             </details>
+            <!-- COLLAPSIBLE SECTION 3: EMPTY FOLDER CLEANUP -->
+            <details class="sub-details" id="plan-details-cleanup" ${sectionsOpen ? 'open' : ''} style="margin-top:16px; ${plan.folderCleanup ? '' : 'display:none;'}">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700;" title="Safe empty folder cleanup and migration planned across pool volumes">Empty Folder Cleanup</span>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="state-pill state-complete" style="font-size:11px; padding:2px 8px; background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;" title="Empty folder copies on non-primary volumes that will be cleaned up">
+                            Cleaned: ${(plan.folderCleanup?.cleanedCount || 0).toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Empty folders with no other copies that will be preserved on the primary volume">
+                            Preserved: ${(plan.folderCleanup?.preservedUniqueCount || 0).toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="Folders containing active files or subfolders that will remain in place">
+                            Kept: ${(plan.folderCleanup?.keptWithDataCount || 0).toLocaleString()}
+                        </span>
+                    </div>
+                </summary>
+                <div class="sub-content" id="plan-folder-cleanup-container" style="padding:16px 12px; overflow-x:auto;"></div>
+            </details>
         `;
 
         function computeVolumeTransfers(volumes) {
@@ -573,5 +591,190 @@ window.Balancer.plan = {
 
         renderVolumes();
         renderPlacements();
+
+        const folderContainer = containerEl.querySelector('#plan-folder-cleanup-container');
+        if (folderContainer && plan.folderCleanup) {
+            window.Balancer.plan.renderFolderCleanup(plan.folderCleanup, folderContainer);
+        }
+    },
+
+    renderFolderCleanup(summary, containerEl) {
+        if (!containerEl) return;
+        if (!summary) {
+            containerEl.innerHTML = '<div style="color:var(--muted); font-size:12px; text-align:center; padding:16px;">No folder cleanup planned.</div>';
+            return;
+        }
+
+        const escapeHtml = window.Balancer.escapeHtml;
+        const totalEvaluated = summary.totalFoldersEvaluated || 0;
+        const totalInstances = summary.totalFolderInstances || (summary.cleanedCount + summary.preservedUniqueCount + summary.keptWithDataCount);
+        const cleanedCount = summary.cleanedCount || 0;
+        const preservedCount = summary.preservedUniqueCount || 0;
+        const keptDataCount = summary.keptWithDataCount || 0;
+
+        let activeFilter = containerEl.dataset.filter || 'Cleaned';
+        let searchQuery = containerEl.dataset.search || '';
+        let searchTimeout = null;
+
+        async function fetchAndRenderTable(tbodyEl, statusNoteEl) {
+            tbodyEl.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--muted);"><span class="spinner" style="width:14px; height:14px; margin-right:8px;"></span> Loading folder details...</td></tr>`;
+            try {
+                let items = [];
+                let totalMatching = 0;
+
+                if (summary.actions && summary.actions.length > 0) {
+                    let filtered = summary.actions;
+                    if (activeFilter && activeFilter !== 'All') {
+                        filtered = filtered.filter(a => (a.status || '').toLowerCase() === activeFilter.toLowerCase());
+                    }
+                    if (searchQuery) {
+                        const q = searchQuery.toLowerCase();
+                        filtered = filtered.filter(a =>
+                            (a.relativePath || '').toLowerCase().includes(q) ||
+                            (a.volumeAlias || '').toLowerCase().includes(q) ||
+                            (a.primaryVolumeAlias || '').toLowerCase().includes(q) ||
+                            (a.reason || '').toLowerCase().includes(q)
+                        );
+                    }
+                    totalMatching = filtered.length;
+                    items = filtered.slice(0, 500);
+                } else {
+                    const params = new URLSearchParams();
+                    if (activeFilter && activeFilter !== 'All') params.set('status', activeFilter);
+                    if (searchQuery) params.set('search', searchQuery);
+                    params.set('limit', '500');
+
+                    const res = await fetch(`/api/plan/folder-cleanup?${params.toString()}`);
+                    if (!res.ok) throw new Error('Failed to load details');
+                    const data = await res.json();
+                    items = data.items || [];
+                    totalMatching = data.total || 0;
+                }
+
+                if (items.length === 0) {
+                    tbodyEl.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:24px; color:var(--muted);">No folders matching current filter.</td></tr>`;
+                    if (statusNoteEl) statusNoteEl.textContent = '';
+                    return;
+                }
+
+                tbodyEl.innerHTML = items.map(a => {
+                    const cleanPath = (a.relativePath || '').replace(/^[\\\/]+/, '');
+                    let statusBadge = '';
+                    if (a.status === 'Cleaned') {
+                        statusBadge = `<span style="background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">CLEANED</span>`;
+                    } else if (a.status === 'PreservedUnique') {
+                        statusBadge = `<span style="background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">PRESERVED UNIQUE</span>`;
+                    } else {
+                        statusBadge = `<span style="background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">KEPT (DATA)</span>`;
+                    }
+
+                    return `
+                        <tr>
+                            <td style="font-family:monospace; font-size:11px; color:var(--ink); word-break:break-all;">
+                                📁 ${escapeHtml(cleanPath || '<Pool Root>')}
+                            </td>
+                            <td style="text-align:center;">
+                                <strong style="font-size:12px;">${escapeHtml(a.volumeAlias)}</strong>
+                            </td>
+                            <td style="text-align:center;">
+                                <span style="font-size:12px; color:var(--muted);">${escapeHtml(a.primaryVolumeAlias || '-')}</span>
+                            </td>
+                            <td>
+                                ${statusBadge}
+                            </td>
+                            <td style="color:var(--muted); font-size:11px;">
+                                ${escapeHtml(a.reason)}
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+
+                if (statusNoteEl) {
+                    if (totalMatching > items.length) {
+                        statusNoteEl.textContent = `Showing top ${items.length.toLocaleString()} of ${totalMatching.toLocaleString()} matching records. Use the search input to narrow results.`;
+                    } else {
+                        statusNoteEl.textContent = `Showing all ${totalMatching.toLocaleString()} matching records.`;
+                    }
+                }
+            } catch (err) {
+                tbodyEl.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:20px; color:var(--red);">Failed to load folder records: ${escapeHtml(err.message)}</td></tr>`;
+                if (statusNoteEl) statusNoteEl.textContent = '';
+            }
+        }
+
+        function renderUI() {
+            containerEl.innerHTML = `
+                <div>
+                    <div style="font-size:12px; color:var(--muted); margin-bottom:12px;">
+                        Evaluated ${totalEvaluated.toLocaleString()} logical folder paths across ${totalInstances.toLocaleString()} volume instances
+                    </div>
+
+                    <!-- Filter Controls -->
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
+                        <div class="cleanup-pills" style="display:flex; gap:6px; flex-wrap:wrap;">
+                            <button type="button" class="btn ${activeFilter === 'Cleaned' ? 'primary' : ''}" data-status="Cleaned" style="font-size:12px; padding:4px 10px;">
+                                Cleaned (${cleanedCount.toLocaleString()})
+                            </button>
+                            <button type="button" class="btn ${activeFilter === 'PreservedUnique' ? 'primary' : ''}" data-status="PreservedUnique" style="font-size:12px; padding:4px 10px;">
+                                Preserved Unique (${preservedCount.toLocaleString()})
+                            </button>
+                            <button type="button" class="btn ${activeFilter === 'KeptWithData' ? 'primary' : ''}" data-status="KeptWithData" style="font-size:12px; padding:4px 10px;">
+                                Kept with Data (${keptDataCount.toLocaleString()})
+                            </button>
+                            <button type="button" class="btn ${activeFilter === 'All' ? 'primary' : ''}" data-status="All" style="font-size:12px; padding:4px 10px;">
+                                All (${totalInstances.toLocaleString()})
+                            </button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <input type="text" class="cleanup-search-input" placeholder="Search path, volume, reason..." value="${escapeHtml(searchQuery)}" style="font-size:12px; padding:5px 10px; width:240px; border:1px solid var(--line); border-radius:4px;">
+                        </div>
+                    </div>
+
+                    <!-- Actions Table -->
+                    <div style="max-height:420px; overflow-y:auto; border:1px solid var(--line); border-radius:6px; background:#fff;">
+                        <table class="plan-table" style="margin:0; width:100%; font-size:12px;">
+                            <thead>
+                                <tr style="position:sticky; top:0; background:#f4f6f2; z-index:2;">
+                                    <th style="width:auto;">Relative Folder Path</th>
+                                    <th style="width:90px; text-align:center;">Volume</th>
+                                    <th style="width:110px; text-align:center;">Primary Keeper</th>
+                                    <th style="width:130px;">Action Status</th>
+                                    <th style="width:auto;">Safety Verification / Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody class="cleanup-tbody"></tbody>
+                        </table>
+                    </div>
+                    <div class="cleanup-status-note" style="font-size:11px; color:var(--muted); text-align:center; margin-top:8px;"></div>
+                </div>
+            `;
+
+            const tbodyEl = containerEl.querySelector('.cleanup-tbody');
+            const noteEl = containerEl.querySelector('.cleanup-status-note');
+            fetchAndRenderTable(tbodyEl, noteEl);
+
+            containerEl.querySelectorAll('.cleanup-pills button').forEach(btn => {
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    activeFilter = btn.dataset.status;
+                    containerEl.dataset.filter = activeFilter;
+                    renderUI();
+                });
+            });
+
+            const searchInput = containerEl.querySelector('.cleanup-search-input');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    searchQuery = e.target.value.trim();
+                    containerEl.dataset.search = searchQuery;
+                    clearTimeout(searchTimeout);
+                    searchTimeout = setTimeout(() => {
+                        fetchAndRenderTable(tbodyEl, noteEl);
+                    }, 250);
+                });
+            }
+        }
+
+        renderUI();
     }
 };

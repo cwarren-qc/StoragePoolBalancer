@@ -3,11 +3,12 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
 using System.Linq;
+using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Domain;
 
-namespace StorageBalancer.App.Subsystems.Execution;
+namespace StorageBalancer.App.Subsystems.Planning;
 
-public static class FolderCleanupSimulator
+public static class FolderCleanupPlanner
 {
     private sealed class MutableFolderInfo
     {
@@ -36,7 +37,106 @@ public static class FolderCleanupSimulator
         return lastSlash >= 0 ? path.Substring(0, lastSlash) : string.Empty;
     }
 
-    public static FolderCleanupSummary Simulate(PoolSnapshot snapshot, IReadOnlyList<FileMoveTask> completedTasks)
+    private static bool IsSameOrDescendant(string path, string parent)
+    {
+        if (string.IsNullOrEmpty(parent)) return true;
+        return string.Equals(path, parent, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(parent + "\\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int GetRuleDepth(string path)
+    {
+        return string.IsNullOrEmpty(path) ? 1 : path.Count(c => c == '\\') + 1;
+    }
+
+    private static string? ResolveTargetVolumeForFolder(
+        string folderPath,
+        IReadOnlyList<FilePlacementRuleConfig>? rules,
+        Dictionary<string, Dictionary<string, MutableFolderInfo>> volumeTrees)
+    {
+        if (string.IsNullOrEmpty(folderPath)) return null;
+
+        // 1. Check matching File Placement Rules
+        if (rules != null && rules.Count > 0)
+        {
+            FilePlacementRuleConfig? bestRule = null;
+            int bestRuleMatchDepth = -1;
+
+            foreach (var rule in rules)
+            {
+                if (rule.AllowedVolumeAliases == null || rule.AllowedVolumeAliases.Count == 0)
+                    continue;
+
+                string normRulePath = NormalizePath(rule.FullRelativePath);
+                if (IsSameOrDescendant(folderPath, normRulePath))
+                {
+                    int depth = GetRuleDepth(folderPath);
+                    if (depth >= rule.StartingDepth)
+                    {
+                        int ruleDepth = string.IsNullOrEmpty(normRulePath) ? 0 : normRulePath.Split('\\').Length;
+                        if (ruleDepth > bestRuleMatchDepth)
+                        {
+                            bestRuleMatchDepth = ruleDepth;
+                            bestRule = rule;
+                        }
+                    }
+                }
+            }
+
+            if (bestRule != null)
+            {
+                var allowed = bestRule.AllowedVolumeAliases.Contains("*")
+                    ? volumeTrees.Keys.ToList()
+                    : bestRule.AllowedVolumeAliases
+                        .Where(a => volumeTrees.ContainsKey(a))
+                        .ToList();
+
+                if (allowed.Count == 1)
+                {
+                    return allowed[0];
+                }
+                else if (allowed.Count > 1)
+                {
+                    // Check if an ancestor has active contents on one of these allowed volumes
+                    string curr = GetParentPath(folderPath);
+                    while (!string.IsNullOrEmpty(curr))
+                    {
+                        var match = allowed.FirstOrDefault(a =>
+                            volumeTrees[a].TryGetValue(curr, out var info) && info.HasContents);
+                        if (match != null) return match;
+                        curr = GetParentPath(curr);
+                    }
+
+                    return allowed[0];
+                }
+            }
+        }
+
+        // 2. Check parent/ancestor consolidation: find volume where ancestor has active contents
+        string ancestor = GetParentPath(folderPath);
+        while (!string.IsNullOrEmpty(ancestor))
+        {
+            var volsWithData = volumeTrees
+                .Where(kv => kv.Value.TryGetValue(ancestor, out var info) && info.HasContents)
+                .OrderByDescending(kv => kv.Value[ancestor].Files.Count)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            if (volsWithData.Count > 0)
+            {
+                return volsWithData[0];
+            }
+
+            ancestor = GetParentPath(ancestor);
+        }
+
+        return null;
+    }
+
+    public static FolderCleanupSummary Calculate(
+        PoolSnapshot snapshot,
+        IReadOnlyList<FileMoveTask> plannedMoves,
+        IReadOnlyList<FilePlacementRuleConfig>? rules)
     {
         // 1. Build initial folder structure per volume from snapshot
         var volumeTrees = new Dictionary<string, Dictionary<string, MutableFolderInfo>>(StringComparer.OrdinalIgnoreCase);
@@ -68,8 +168,8 @@ public static class FolderCleanupSimulator
             }
         }
 
-        // 2. Apply simulated file moves
-        foreach (var task in completedTasks)
+        // 2. Apply planned file moves
+        foreach (var task in plannedMoves)
         {
             string normFilePath = NormalizePath(task.RelativePath);
             string folderPath = GetParentPath(normFilePath);
@@ -119,28 +219,13 @@ public static class FolderCleanupSimulator
             if (volumesWithFolder.Count == 0)
                 continue;
 
-            // Rule 1: Singleton folder in pool -> NEVER delete!
-            if (volumesWithFolder.Count == 1)
-            {
-                string singleVol = volumesWithFolder[0];
-                preservedUniqueCount++;
-                actions.Add(new FolderCleanupAction(
-                    folderPath,
-                    singleVol,
-                    singleVol,
-                    "PreservedUnique",
-                    "Preserved: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
-                ));
-                continue;
-            }
-
-            // Rule 2: Multi-volume folder.
             // Categorize which volumes have real contents (files or subfolders)
             var volumesWithData = volumesWithFolder
                 .Where(v => volumeTrees[v][folderPath].HasContents)
                 .ToList();
 
             string primaryVolume;
+
             if (volumesWithData.Count > 0)
             {
                 // Choose volume with data as Primary (prefer the one with the most files)
@@ -151,17 +236,48 @@ public static class FolderCleanupSimulator
             }
             else
             {
-                // All sibling volumes are empty! Choose the first volume as Primary and KEEP it
-                // so the user's empty folder remains intact in the merged view.
-                primaryVolume = volumesWithFolder.First();
-                preservedUniqueCount++;
-                actions.Add(new FolderCleanupAction(
-                    folderPath,
-                    primaryVolume,
-                    primaryVolume,
-                    "PreservedUnique",
-                    "Designated Primary: kept so logical empty folder remains visible in merged view"
-                ));
+                // All current volume instances of this folder are completely empty!
+                // Check if placement rules or parent consolidation dictates a target volume:
+                string? targetVol = ResolveTargetVolumeForFolder(folderPath, rules, volumeTrees);
+
+                if (targetVol != null && volumeTrees.ContainsKey(targetVol))
+                {
+                    primaryVolume = targetVol;
+                    if (!volumesWithFolder.Contains(targetVol, StringComparer.OrdinalIgnoreCase))
+                    {
+                        EnsureFolderChain(volumeTrees[targetVol], folderPath);
+                        volumesWithFolder.Add(targetVol);
+                    }
+
+                    preservedUniqueCount++;
+                    actions.Add(new FolderCleanupAction(
+                        folderPath,
+                        primaryVolume,
+                        primaryVolume,
+                        "PreservedUnique",
+                        $"Designated Primary: empty folder migrated to {primaryVolume} per placement rule/consolidation"
+                    ));
+                }
+                else
+                {
+                    primaryVolume = volumesWithFolder.First();
+                    preservedUniqueCount++;
+                    actions.Add(new FolderCleanupAction(
+                        folderPath,
+                        primaryVolume,
+                        primaryVolume,
+                        "PreservedUnique",
+                        volumesWithFolder.Count == 1
+                            ? "Preserved: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
+                            : "Designated Primary: kept so logical empty folder remains visible in merged view"
+                    ));
+                }
+            }
+
+            // If it was a singleton folder that stayed on its original volume (not relocated):
+            if (volumesWithFolder.Count == 1)
+            {
+                continue;
             }
 
             // Now evaluate sibling volumes against Primary
@@ -199,7 +315,6 @@ public static class FolderCleanupSimulator
                 else
                 {
                     // Redundant empty folder! Sibling volume has 0 files and 0 subfolders.
-                    // Verified: Primary still exists in volumeTrees[primaryVolume]
                     cleanedCount++;
                     actions.Add(new FolderCleanupAction(
                         folderPath,

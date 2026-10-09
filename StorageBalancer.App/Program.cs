@@ -253,6 +253,12 @@ app.MapPost("/api/execution/start", (ExecutionStartRequest? request, ConfigManag
 
 app.MapGet("/api/execution/status", (PlanExecutor executor) => executor.GetStatus());
 
+app.MapGet("/api/plan/folder-cleanup", (PlanExecutor executor, string? status, string? search, int? limit, int? offset) =>
+{
+    var (total, items) = executor.QueryFolderCleanup(status, search, limit ?? 500, offset ?? 0);
+    return Results.Ok(new { Total = total, Items = items });
+});
+
 app.MapGet("/api/execution/folder-cleanup", (PlanExecutor executor, string? status, string? search, int? limit, int? offset) =>
 {
     var (total, items) = executor.QueryFolderCleanup(status, search, limit ?? 500, offset ?? 0);

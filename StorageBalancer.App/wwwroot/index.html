@@ -187,7 +187,6 @@
                         <tr><td colspan="6" class="step-placeholder">Execution will begin automatically after the placement plan is generated.</td></tr>
                     </tbody>
                 </table>
-                <div id="exec-folder-cleanup-container" style="display:none; margin-top:20px;"></div>
             </div>
         </details>
     </main>
@@ -309,10 +308,6 @@
                     }
                     const volumeColors = Balancer.getVolumeColorMap(appState.config?.volumes || []);
                     Balancer.execution.renderTable(execStatus, execTbody, volumeColors);
-                    const folderContainer = document.getElementById('exec-folder-cleanup-container');
-                    if (folderContainer && execStatus.folderCleanup) {
-                        Balancer.execution.renderFolderCleanup(execStatus.folderCleanup, folderContainer);
-                    }
                 }
             } catch (e) {}
         }
@@ -328,12 +323,6 @@
             if (appState.isRunning) return;
             appState.isRunning = true;
             clearNotice();
-
-            const folderContainer = document.getElementById('exec-folder-cleanup-container');
-            if (folderContainer) {
-                folderContainer.style.display = 'none';
-                folderContainer.innerHTML = '';
-            }
 
             btnStart.disabled = true;
             btnStart.style.display = 'none';
@@ -458,12 +447,6 @@
             const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
             if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
 
-            const folderContainer = document.getElementById('exec-folder-cleanup-container');
-            if (folderContainer) {
-                folderContainer.style.display = 'none';
-                folderContainer.innerHTML = '';
-            }
-
             return new Promise(async (resolve, reject) => {
                 try {
                     await Balancer.execution.start({
@@ -519,9 +502,6 @@
                                 execSpeed.textContent = '0 MB/s';
                                 if (execFoldersCleaned) {
                                     execFoldersCleaned.textContent = status.folderCleanup ? (status.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
-                                }
-                                if (folderContainer && status.folderCleanup) {
-                                    Balancer.execution.renderFolderCleanup(status.folderCleanup, folderContainer);
                                 }
                                 resolve();
                             }

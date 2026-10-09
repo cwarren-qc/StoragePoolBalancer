@@ -239,6 +239,11 @@ public class PlanExecutor
         {
             string fingerprint = GetConfigFingerprint(config);
             _cachedPlan = new CachedPlan(snapshotName, scannedAt, fingerprint, plan);
+            if (!_isRunning)
+            {
+                _folderCleanup = plan.FolderCleanup;
+                _allFolderCleanupActions = plan.FolderCleanup?.Actions ?? ImmutableList<FolderCleanupAction>.Empty;
+            }
         }
     }
 
@@ -433,7 +438,7 @@ public class PlanExecutor
             }
         }
 
-        if (_totalFiles == 0)
+        if (_totalFiles == 0 && (plan.FolderCleanup == null || plan.FolderCleanup.CleanedCount == 0))
         {
             lock (_stateLock)
             {
@@ -447,18 +452,38 @@ public class PlanExecutor
             ? new SimulatedFileSystemOperator(durationSeconds, _totalBytes, maxThreads)
             : new RealFileSystemOperator(config.VerifyCopies);
 
-        await ExecutePlanAsync(fsOperator, moveItems, snapshot, volumeRootMap, durationSeconds, maxThreads, ct).ConfigureAwait(false);
+        await ExecutePlanAsync(fsOperator, moveItems, plan.FolderCleanup, volumeRootMap, durationSeconds, maxThreads, ct).ConfigureAwait(false);
     }
 
     private async Task ExecutePlanAsync(
         IFileSystemOperator fsOperator,
         List<FileMoveTask> tasks,
-        PoolSnapshot snapshot,
+        FolderCleanupSummary? folderCleanup,
         Dictionary<string, string> volumeRootMap,
         int durationSeconds,
         int maxThreads,
         CancellationToken ct)
     {
+        // 1. Ensure all designated primary folders exist before starting file transfers.
+        // This ensures migrated empty folders and targets exist up-front. If a user deletes
+        // a folder during the file copy process (which may take hours), we avoid re-creating it later.
+        if (folderCleanup != null)
+        {
+            foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned" || a.Status == "PreservedUnique"))
+            {
+                ct.ThrowIfCancellationRequested();
+
+                string primaryRoot = volumeRootMap.GetValueOrDefault(action.PrimaryVolumeAlias, "");
+                string cleanRelPath = action.RelativePath.TrimStart('\\', '/');
+                string primaryFolderPath = !string.IsNullOrEmpty(primaryRoot) ? Path.Combine(primaryRoot, cleanRelPath) : "";
+
+                if (!string.IsNullOrEmpty(primaryFolderPath))
+                {
+                    await fsOperator.EnsureFolderExistsAsync(primaryFolderPath, ct).ConfigureAwait(false);
+                }
+            }
+        }
+
         var lockManager = new PhysicalDiskLockManager();
         var queueLock = new object();
 
@@ -494,34 +519,35 @@ public class PlanExecutor
             }
         }
 
-        var folderCleanup = FolderCleanupSimulator.Simulate(snapshot, tasks);
-
-        foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned"))
+        if (folderCleanup != null)
         {
-            ct.ThrowIfCancellationRequested();
+            foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned"))
+            {
+                ct.ThrowIfCancellationRequested();
 
-            string volRoot = volumeRootMap.GetValueOrDefault(action.VolumeAlias, "");
-            string primaryRoot = volumeRootMap.GetValueOrDefault(action.PrimaryVolumeAlias, "");
-            string cleanRelPath = action.RelativePath.TrimStart('\\', '/');
+                string volRoot = volumeRootMap.GetValueOrDefault(action.VolumeAlias, "");
+                string primaryRoot = volumeRootMap.GetValueOrDefault(action.PrimaryVolumeAlias, "");
+                string cleanRelPath = action.RelativePath.TrimStart('\\', '/');
 
-            string targetFolderPath = !string.IsNullOrEmpty(volRoot) ? Path.Combine(volRoot, cleanRelPath) : "";
-            string primaryFolderPath = !string.IsNullOrEmpty(primaryRoot) ? Path.Combine(primaryRoot, cleanRelPath) : "";
+                string targetFolderPath = !string.IsNullOrEmpty(volRoot) ? Path.Combine(volRoot, cleanRelPath) : "";
+                string primaryFolderPath = !string.IsNullOrEmpty(primaryRoot) ? Path.Combine(primaryRoot, cleanRelPath) : "";
 
-            var cleanupTask = new FolderCleanupTask(
-                action.RelativePath,
-                action.VolumeAlias,
-                action.PrimaryVolumeAlias,
-                targetFolderPath,
-                primaryFolderPath
-            );
+                var cleanupTask = new FolderCleanupTask(
+                    action.RelativePath,
+                    action.VolumeAlias,
+                    action.PrimaryVolumeAlias,
+                    targetFolderPath,
+                    primaryFolderPath
+                );
 
-            await fsOperator.DeleteFolderAsync(cleanupTask, ct).ConfigureAwait(false);
+                await fsOperator.DeleteFolderAsync(cleanupTask, ct).ConfigureAwait(false);
+            }
         }
 
         lock (_stateLock)
         {
-            _allFolderCleanupActions = folderCleanup.Actions;
-            _folderCleanup = folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty };
+            _allFolderCleanupActions = folderCleanup?.Actions ?? ImmutableList<FolderCleanupAction>.Empty;
+            _folderCleanup = folderCleanup != null ? folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty } : null;
             _completedAt = DateTime.UtcNow;
             _isRunning = false;
             _phase = "Completed";

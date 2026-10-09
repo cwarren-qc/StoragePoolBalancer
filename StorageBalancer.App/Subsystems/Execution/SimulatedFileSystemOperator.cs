@@ -65,6 +65,12 @@ public class SimulatedFileSystemOperator : IFileSystemOperator
         }
     }
 
+    public Task EnsureFolderExistsAsync(string folderPath, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        return Task.CompletedTask;
+    }
+
     public Task DeleteFolderAsync(FolderCleanupTask task, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

@@ -196,6 +196,25 @@ public class RealFileSystemOperator : IFileSystemOperator
         }
     }
 
+    public Task EnsureFolderExistsAsync(string folderPath, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        if (!string.IsNullOrWhiteSpace(folderPath) && !Directory.Exists(folderPath))
+        {
+            try
+            {
+                Directory.CreateDirectory(folderPath);
+            }
+            catch
+            {
+                // Best-effort directory creation
+            }
+        }
+
+        return Task.CompletedTask;
+    }
+
     public Task DeleteFolderAsync(FolderCleanupTask task, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();

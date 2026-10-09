@@ -345,7 +345,6 @@
                         <tr><td colspan="6" style="text-align:center; color:var(--muted); padding:20px;">No simulation running. Select a snapshot and click 'Run Simulation'.</td></tr>
                     </tbody>
                 </table>
-                <div id="exec-folder-cleanup-container" style="display:none; margin-top:20px;"></div>
             </div>
         </details>
     </main>
@@ -976,7 +975,6 @@
             const execProgressFill = document.getElementById('exec-progress-fill');
             const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
             const notice = document.getElementById('exec-notice');
-            const folderContainer = document.getElementById('exec-folder-cleanup-container');
 
             btnStart.style.display = status.isRunning ? 'none' : 'inline-flex';
             btnCancel.style.display = status.isRunning ? 'inline-flex' : 'none';
@@ -987,7 +985,6 @@
 
             if (status.isRunning) {
                 summaryBar.style.display = 'flex';
-                if (folderContainer) folderContainer.style.display = 'none';
                 const isPrep = status.phase === 'Preparing' || !status.volumes || status.volumes.length === 0;
                 if (isPrep) {
                     subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
@@ -1036,20 +1033,9 @@
                     notice.textContent = 'Simulation finished successfully.';
                     notice.className = 'notice success';
                 }
-
-                if (folderContainer && status.folderCleanup) {
-                    Balancer.execution.renderFolderCleanup(status.folderCleanup, folderContainer);
-                } else if (folderContainer) {
-                    folderContainer.style.display = 'none';
-                    folderContainer.innerHTML = '';
-                }
             } else {
                 subtitle.textContent = '';
                 if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
-                if (folderContainer) {
-                    folderContainer.style.display = 'none';
-                    folderContainer.innerHTML = '';
-                }
             }
         }
 
@@ -1093,13 +1079,8 @@
             const execTbody = document.getElementById('exec-tbody');
             const btnStart = document.getElementById('btn-exec-start');
             const btnCancel = document.getElementById('btn-exec-cancel');
-            const folderContainer = document.getElementById('exec-folder-cleanup-container');
             const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
             if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
-            if (folderContainer) {
-                folderContainer.style.display = 'none';
-                folderContainer.innerHTML = '';
-            }
 
             // Immediate UI feedback on button click
             btnStart.style.display = 'none';

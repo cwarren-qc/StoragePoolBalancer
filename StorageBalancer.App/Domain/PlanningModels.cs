@@ -89,5 +89,6 @@ public sealed record PlacementPlan(
     DateTime SnapshotScannedAt,
     ImmutableArray<PlannedPlacement> Placements,
     ImmutableArray<PlanningWarning> Warnings,
-    ImmutableArray<VolumePlanSummary> Volumes
+    ImmutableArray<VolumePlanSummary> Volumes,
+    FolderCleanupSummary? FolderCleanup = null
 );

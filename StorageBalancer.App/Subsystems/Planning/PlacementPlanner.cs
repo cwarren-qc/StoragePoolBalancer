@@ -222,7 +222,24 @@ public sealed class PlacementPlanner
             .OrderBy(p => p.RelativePath, StringComparer.OrdinalIgnoreCase)
             .ToImmutableArray();
 
-        return new PlacementPlan(snapshot.ScannedAt, finalPlacements, warnings.ToImmutable(), volumeSummaries);
+        var plannedMoveTasks = ctx.MatchRecords
+            .SelectMany(m => m.Files)
+            .Where(f => !string.Equals(f.OriginalVolumeAlias, f.DestinationVolumeAlias, StringComparison.OrdinalIgnoreCase))
+            .Select(f => new FileMoveTask(
+                f.Name,
+                f.RelativePath,
+                f.OriginalVolumeAlias,
+                f.DestinationVolumeAlias,
+                "",
+                "",
+                f.Size,
+                f.SizeOnDisk
+            ))
+            .ToList();
+
+        var folderCleanup = FolderCleanupPlanner.Calculate(snapshot, plannedMoveTasks, rules);
+
+        return new PlacementPlan(snapshot.ScannedAt, finalPlacements, warnings.ToImmutable(), volumeSummaries, folderCleanup);
     }
 
     private static void PopulateUnassigned(PlanningFolder folder, PlanContext ctx)
