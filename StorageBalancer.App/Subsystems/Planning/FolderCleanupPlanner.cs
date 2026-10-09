@@ -254,7 +254,7 @@ public static class FolderCleanupPlanner
                         folderPath,
                         primaryVolume,
                         primaryVolume,
-                        FolderCleanupStatus.Preserving,
+                        FolderCleanupStatus.PreservingUnique,
                         $"Designated Primary: empty folder migrated to {primaryVolume} per placement rule/consolidation"
                     ));
                 }
@@ -266,9 +266,9 @@ public static class FolderCleanupPlanner
                         folderPath,
                         primaryVolume,
                         primaryVolume,
-                        FolderCleanupStatus.Preserving,
+                        FolderCleanupStatus.PreservingUnique,
                         volumesWithFolder.Count == 1
-                            ? "Preserving: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
+                            ? "Preserving Unique: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
                             : "Designated Primary: kept so logical empty folder remains visible in merged view"
                     ));
                 }
@@ -293,7 +293,7 @@ public static class FolderCleanupPlanner
                             folderPath,
                             vol,
                             primaryVolume,
-                            FolderCleanupStatus.Keeping,
+                            FolderCleanupStatus.KeepingWithData,
                             "Primary copy: active files or subdirectories remain on this volume"
                         ));
                     }
@@ -308,8 +308,8 @@ public static class FolderCleanupPlanner
                         folderPath,
                         vol,
                         primaryVolume,
-                        FolderCleanupStatus.Keeping,
-                        "Keeping: volume still contains active files or subdirectories"
+                        FolderCleanupStatus.KeepingWithData,
+                        "Keeping with data: volume still contains active files or subdirectories"
                     ));
                 }
                 else

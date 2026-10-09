@@ -35,8 +35,91 @@ if (!window.Balancer.getVolumeColorMap) {
     };
 }
 
+// Placement Logic and Folder Cleanup Status Metadata
+const logicAppliedStayingInPlace = 'StayingInPlace';
+const logicAppliedConsolidating = 'Consolidating';
+const logicAppliedMoving = 'Moving';
+const logicAppliedMovingConsolidating = 'MovingConsolidating';
+const logicAppliedSplitting = 'Splitting';
+
+const greenPillStyle = 'background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;';
+
+const placementLogicConfigs = [
+    {
+        name: logicAppliedStayingInPlace,
+        displayName: 'Staying in place',
+        description: 'All files already reside on allowed target volumes and require no file movement.',
+        colorStyle: greenPillStyle,
+        title: 'Paths already residing on target volumes with no movement needed'
+    },
+    {
+        name: logicAppliedConsolidating,
+        displayName: 'Consolidating',
+        description: 'Files dispersed across multiple volumes are gathered onto the primary volume.',
+        colorStyle: greenPillStyle,
+        title: 'Paths consolidating onto primary volume'
+    },
+    {
+        name: logicAppliedMoving,
+        displayName: 'Moving',
+        description: 'All files under this path are assigned to move from their source volume to a target volume.',
+        colorStyle: greenPillStyle,
+        title: 'Paths requiring file movements to target volumes'
+    },
+    {
+        name: logicAppliedMovingConsolidating,
+        displayName: 'Moving/Consolidating',
+        description: 'Files dispersed across multiple volumes are gathered onto a new single target volume.',
+        colorStyle: greenPillStyle,
+        title: 'Dispersed paths moving and consolidating onto a target volume'
+    },
+    {
+        name: logicAppliedSplitting,
+        displayName: 'Splitting',
+        description: 'Files distributed across multiple allowed target volumes based on depth and available capacity.',
+        colorStyle: greenPillStyle,
+        title: 'Paths distributed across multiple volumes'
+    }
+];
+
+const folderCleanupStatusPreservingUnique = 'PreservingUnique';
+const folderCleanupStatusKeepingWithData = 'KeepingWithData';
+const folderCleanupStatusCleaning = 'Cleaning';
+
+const folderCleanupStatusConfigs = [
+    {
+        name: folderCleanupStatusPreservingUnique,
+        displayName: 'Preserving Unique',
+        countKey: 'preservedUniqueCount',
+        colorStyle: greenPillStyle,
+        badgeStyle: `${greenPillStyle} font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;`,
+        badgeText: 'PRESERVING UNIQUE',
+        title: 'Empty folders with no other copies that will be preserved on the primary volume'
+    },
+    {
+        name: folderCleanupStatusKeepingWithData,
+        displayName: 'Keeping with data',
+        countKey: 'keptWithDataCount',
+        colorStyle: greenPillStyle,
+        badgeStyle: `${greenPillStyle} font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;`,
+        badgeText: 'KEEPING WITH DATA',
+        title: 'Folders containing active files or subfolders that will remain in place'
+    },
+    {
+        name: folderCleanupStatusCleaning,
+        displayName: 'Cleaning',
+        countKey: 'cleanedCount',
+        colorStyle: greenPillStyle,
+        badgeStyle: `${greenPillStyle} font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;`,
+        badgeText: 'CLEANING',
+        title: 'Empty folder copies on non-primary volumes that will be cleaned up'
+    }
+];
+
 // Planner Subsystem
 window.Balancer.plan = {
+    placementLogicConfigs: placementLogicConfigs,
+    folderCleanupStatusConfigs: folderCleanupStatusConfigs,
     async loadSnapshots(selectEl, defaultOptionLabel = 'No snapshots found') {
         if (!selectEl) return [];
         const escapeHtml = window.Balancer.escapeHtml;
@@ -172,44 +255,29 @@ window.Balancer.plan = {
             }
         });
 
-        const poolFinalPct = totalCapacity > 0 ? (totalFinalUsed / totalCapacity) * 100 : 0;
-        const poolStartPct = totalCapacity > 0 ? (totalStartUsed / totalCapacity) * 100 : 0;
-
-        const minFinalPct = finalPcts.length ? Math.min(...finalPcts.map(x => x.pct)) : 0;
-        const maxFinalPct = finalPcts.length ? Math.max(...finalPcts.map(x => x.pct)) : 0;
-        const minStartPct = startPcts.length ? Math.min(...startPcts.map(x => x.pct)) : 0;
-        const maxStartPct = startPcts.length ? Math.max(...startPcts.map(x => x.pct)) : 0;
-
         const placements = plan.placements || [];
-        let pathsMovingCount = 0;
-        let pathsIntactCount = 0;
-        let movedCount = 0;
-        let consolidatedCount = 0;
-        let splitCount = 0;
-        let intactSize = 0;
+        const placementLogicConfigsUsage = placementLogicConfigs.map(config => ({ config, count: 0 }));
 
         placements.forEach(p => {
-            if (p.logicApplied === 'Stayed intact' || (p.sizeMoved === 0 && p.logicApplied !== 'Consolidated' && p.logicApplied !== 'Split')) {
-                pathsIntactCount++;
-                intactSize += (p.sizeOnDisk || 0);
-            } else {
-                pathsMovingCount++;
-                if (p.logicApplied === 'Consolidated' || p.logicApplied === 'Moved/Consolidated') {
-                    consolidatedCount++;
-                } else if (p.logicApplied === 'Split') {
-                    splitCount++;
-                } else {
-                    movedCount++;
-                }
-            }
+            const entry = placementLogicConfigsUsage.find(item => item.config.name === p.logicApplied);
+            if (entry) entry.count++;
         });
-        const totalPathsCount = placements.length;
+
+        const placementPillsHtml = placementLogicConfigsUsage
+            .filter(item => item.count > 0)
+            .map(item => `<span class="state-pill" style="font-size:11px; padding:2px 8px; ${item.config.colorStyle}" title="${item.config.title}: ${item.count.toLocaleString()}">${item.config.displayName}: ${item.count.toLocaleString()}</span>`)
+            .join('\n                        ');
+
+        const folderCleanupPillsHtml = folderCleanupStatusConfigs
+            .map(cfg => {
+                const count = plan.folderCleanup ? (plan.folderCleanup[cfg.countKey] || 0) : 0;
+                return `<span class="state-pill" style="font-size:11px; padding:2px 8px; ${cfg.colorStyle}" title="${cfg.title}">${cfg.displayName}: ${count.toLocaleString()}</span>`;
+            })
+            .join('\n                        ');
+
+        const stayingInPlaceDisplay = placementLogicConfigs.find(c => c.name === logicAppliedStayingInPlace)?.displayName || 'Staying in place';
 
         containerEl.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px;">
-                <span style="font-size:15px;"><strong>${formatBytes(totalMoved)}</strong> to transfer</span>
-                <span style="font-size:12px; color:var(--muted);">Snapshot scanned: ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
-            </div>
             ${warningsHtml}
 
             <!-- COLLAPSIBLE SECTION 1: VOLUME UTILIZATION -->
@@ -222,13 +290,10 @@ window.Balancer.plan = {
                                 Over Capacity: ${overCapacityCount}
                             </span>
                         ` : ''}
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Total pool utilization: ${formatBytes(totalFinalUsed)} used of ${formatBytes(totalCapacity)} capacity (${poolFinalPct.toFixed(1)}%) across ${volumes.length} volume(s)">
-                            Pool: ${poolFinalPct.toFixed(1)}%
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${greenPillStyle}" title="${formatBytes(totalMoved)} total data moving across volumes">
+                            Data Moving: ${formatBytes(totalMoved)}
                         </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f4f0fa; color:#5b3296; border:1px solid #dfd4f2;" title="Projected volume utilization spread: ${minFinalPct.toFixed(1)}% to ${maxFinalPct.toFixed(1)}% (initial: ${minStartPct.toFixed(1)}% to ${maxStartPct.toFixed(1)}%)">
-                            Spread: ${minFinalPct.toFixed(0)}% – ${maxFinalPct.toFixed(0)}%
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${totalFilesMoving > 0 ? 'background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;' : 'background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;'}" title="${totalFilesMoving.toLocaleString()} files moving across ${volumesWithMoves} of ${volumes.length} volume(s)">
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${greenPillStyle}" title="${totalFilesMoving.toLocaleString()} files moving across ${volumesWithMoves} of ${volumes.length} volume(s)">
                             Files Moving: ${totalFilesMoving.toLocaleString()}
                         </span>
                     </div>
@@ -256,17 +321,9 @@ window.Balancer.plan = {
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Folder placement decisions and file balancing rules">Path Placements</span>
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${pathsMovingCount > 0 ? 'background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;' : 'background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;'}" title="${pathsMovingCount.toLocaleString()} paths require file movements (${formatBytes(totalMoved)} total): ${movedCount} moved, ${consolidatedCount} consolidated, ${splitCount} split">
-                            Moving: ${pathsMovingCount.toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="${pathsIntactCount.toLocaleString()} paths stay intact (${formatBytes(intactSize)} already reside on target volumes)">
-                            Intact: ${pathsIntactCount.toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="${totalPathsCount.toLocaleString()} total paths evaluated (${pathsMovingCount} moving, ${pathsIntactCount} intact)">
-                            Total: ${totalPathsCount.toLocaleString()}
-                        </span>
+                        ${placementPillsHtml}
                         <label class="plan-stayed-intact-toggle" style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600; margin-left:4px;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement" onclick="event.stopPropagation();">
-                            <input type="checkbox" class="plan-cb-intact" ${state.showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
+                            <input type="checkbox" class="plan-cb-intact" ${state.showStayedIntact ? 'checked' : ''}> Show '${stayingInPlaceDisplay}'
                         </label>
                     </div>
                 </summary>
@@ -276,7 +333,7 @@ window.Balancer.plan = {
                             <tr>
                                 <th class="sortable" data-sort="order" style="width: 4%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
                                 <th class="sortable" data-sort="path" style="width: 38%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
-                                <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
+                                <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: ${placementLogicConfigs.map(c => c.displayName).join(', ')}. Click to sort.">Logic applied</th>
                                 <th class="sortable" data-sort="target" style="width: 12%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
                                 <th class="sortable" data-sort="size" style="width: 10%; text-align:right;" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
                                 <th class="sortable" data-sort="moved" style="width: 11%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
@@ -292,15 +349,7 @@ window.Balancer.plan = {
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Safe empty folder cleanup and migration planned across pool volumes">Empty Folder Cleanup</span>
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <span class="state-pill state-complete" style="font-size:11px; padding:2px 8px; background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;" title="Empty folder copies on non-primary volumes that will be cleaned up">
-                            Cleaned: ${(plan.folderCleanup?.cleanedCount || 0).toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Empty folders with no other copies that will be preserved on the primary volume">
-                            Preserved: ${(plan.folderCleanup?.preservedUniqueCount || 0).toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="Folders containing active files or subfolders that will remain in place">
-                            Kept: ${(plan.folderCleanup?.keptWithDataCount || 0).toLocaleString()}
-                        </span>
+                        ${folderCleanupPillsHtml}
                     </div>
                 </summary>
                 <div class="sub-content" id="plan-folder-cleanup-container" style="padding:16px 12px; overflow-x:auto;"></div>
@@ -528,7 +577,7 @@ window.Balancer.plan = {
 
             let filtered = state.plan.placements || [];
             if (!state.showStayedIntact) {
-                filtered = filtered.filter(p => p.logicApplied !== 'Stayed intact');
+                filtered = filtered.filter(p => p.logicApplied !== logicAppliedStayingInPlace);
             }
 
             filtered.sort((a, b) => {
@@ -559,7 +608,7 @@ window.Balancer.plan = {
             });
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="7" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check \'Show Stayed intact\' to see unchanged paths.</td></tr>';
+                tbody.innerHTML = `<tr><td colspan="7" class="plan-muted" style="text-align:center; padding:20px;">No placements to show. Check 'Show ${escapeHtml(stayingInPlaceDisplay)}' to see unchanged paths.</td></tr>`;
                 return;
             }
 
@@ -569,7 +618,7 @@ window.Balancer.plan = {
 
                 if (item.targets.length === 0) {
                     targetUi = '<span class="plan-muted">-</span>';
-                } else if (item.logicApplied === 'Split' || item.targets.length > 1) {
+                } else if (item.logicApplied === logicAppliedSplitting || item.targets.length > 1) {
                     const targetAlias = escapeHtml(item.targets[0].alias);
                     const targetColor = state.volumeColors.get(item.targets[0].alias) || '#89958f';
                     const segments = item.targets.map(t => {
@@ -619,7 +668,7 @@ window.Balancer.plan = {
                         if (item.targets && item.targets.length === 1) {
                             const targetAlias = item.targets[0].alias;
                             if (src.alias.toLowerCase() === targetAlias.toLowerCase()) {
-                                tooltip = `${escapeHtml(src.alias)} (Stayed in place): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
+                                tooltip = `${escapeHtml(src.alias)} (${stayingInPlaceDisplay}): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
                             } else {
                                 tooltip = `${escapeHtml(src.alias)}: ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
                             }
@@ -648,20 +697,15 @@ window.Balancer.plan = {
                     pathTitle = 'Loose files and folders residing directly at the root of the storage pool.';
                 }
 
-                const logicDescriptions = {
-                    'Stayed intact': 'All files already reside on allowed target volumes and require no file movement.',
-                    'Moved': 'All files under this path are assigned to move from their source volume to a target volume.',
-                    'Split': 'Files under this path are distributed across multiple allowed target volumes based on depth and available capacity.',
-                    'Consolidated': 'Files dispersed across multiple volumes are gathered onto the primary volume.',
-                    'Moved/Consolidated': 'Files dispersed across multiple volumes are gathered onto a new single target volume.'
-                };
-                const logicTitle = logicDescriptions[item.logicApplied] || item.logicApplied;
+                const logicMeta = placementLogicConfigs.find(c => c.name === item.logicApplied);
+                const logicTitle = logicMeta ? logicMeta.description : item.logicApplied;
+                const logicDisplay = logicMeta ? (logicMeta.displayName || logicMeta.name) : item.logicApplied;
 
                 return `
                     <tr>
                         <td style="font-variant-numeric:tabular-nums; color:var(--muted);" title="${escapeHtml(orderTitle)}">${orderText}</td>
                         <td style="font-family:monospace; font-size:11px; overflow-wrap:anywhere;" title="${escapeHtml(pathTitle)}">${escapeHtml(item.relativePath)}</td>
-                        <td><span class="reason-badge" title="${escapeHtml(logicTitle)}">${escapeHtml(item.logicApplied)}</span></td>
+                        <td><span class="reason-badge" title="${escapeHtml(logicTitle)}">${escapeHtml(logicDisplay)}</span></td>
                         <td>${targetUi}</td>
                         <td style="text-align:right; font-variant-numeric:tabular-nums" title="Total data size on disk: ${formatBytes(item.sizeOnDisk)}">${formatBytes(item.sizeOnDisk)}</td>
                         <td style="text-align:right;" title="${isMoved ? `${formatBytes(item.sizeMoved)} moved between volumes` : 'No movement required'}">${sizeMovedUi}</td>
@@ -712,7 +756,7 @@ window.Balancer.plan = {
         const preservedCount = summary.preservedUniqueCount || 0;
         const keptDataCount = summary.keptWithDataCount || 0;
 
-        let activeFilter = containerEl.dataset.filter || 'Cleaned';
+        let activeFilter = containerEl.dataset.filter || folderCleanupStatusCleaning;
         let searchQuery = containerEl.dataset.search || '';
         let searchTimeout = null;
 
@@ -759,14 +803,10 @@ window.Balancer.plan = {
 
                 tbodyEl.innerHTML = items.map(a => {
                     const cleanPath = (a.relativePath || '').replace(/^[\\\/]+/, '');
-                    let statusBadge = '';
-                    if (a.status === 'Cleaned') {
-                        statusBadge = `<span style="background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">CLEANED</span>`;
-                    } else if (a.status === 'PreservedUnique') {
-                        statusBadge = `<span style="background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">PRESERVED UNIQUE</span>`;
-                    } else {
-                        statusBadge = `<span style="background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">KEPT (DATA)</span>`;
-                    }
+                    const cfg = folderCleanupStatusConfigs.find(c => c.name.toLowerCase() === (a.status || '').toLowerCase());
+                    const statusBadge = cfg
+                        ? `<span style="${cfg.badgeStyle}">${escapeHtml(cfg.badgeText)}</span>`
+                        : `<span style="background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6; font-size:10px; font-weight:700; padding:2px 8px; border-radius:4px;">${escapeHtml((a.status || '').toUpperCase())}</span>`;
 
                     return `
                         <tr>
@@ -812,16 +852,16 @@ window.Balancer.plan = {
                     <!-- Filter Controls -->
                     <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px;">
                         <div class="cleanup-pills" style="display:flex; gap:6px; flex-wrap:wrap;">
-                            <button type="button" class="btn ${activeFilter === 'Cleaned' ? 'primary' : ''}" data-status="Cleaned" style="font-size:12px; padding:4px 10px;">
-                                Cleaned (${cleanedCount.toLocaleString()})
-                            </button>
-                            <button type="button" class="btn ${activeFilter === 'PreservedUnique' ? 'primary' : ''}" data-status="PreservedUnique" style="font-size:12px; padding:4px 10px;">
-                                Preserved Unique (${preservedCount.toLocaleString()})
-                            </button>
-                            <button type="button" class="btn ${activeFilter === 'KeptWithData' ? 'primary' : ''}" data-status="KeptWithData" style="font-size:12px; padding:4px 10px;">
-                                Kept with Data (${keptDataCount.toLocaleString()})
-                            </button>
-                            <button type="button" class="btn ${activeFilter === 'All' ? 'primary' : ''}" data-status="All" style="font-size:12px; padding:4px 10px;">
+                            ${folderCleanupStatusConfigs.map(cfg => {
+                                const count = summary[cfg.countKey] || 0;
+                                const isActive = activeFilter.toLowerCase() === cfg.name.toLowerCase();
+                                return `
+                                    <button type="button" class="btn ${isActive ? 'primary' : ''}" data-status="${escapeHtml(cfg.name)}" style="font-size:12px; padding:4px 10px;">
+                                        ${escapeHtml(cfg.name)} (${count.toLocaleString()})
+                                    </button>
+                                `;
+                            }).join('')}
+                            <button type="button" class="btn ${activeFilter.toLowerCase() === 'all' ? 'primary' : ''}" data-status="All" style="font-size:12px; padding:4px 10px;">
                                 All (${totalInstances.toLocaleString()})
                             </button>
                         </div>
@@ -876,5 +916,50 @@ window.Balancer.plan = {
         }
 
         renderUI();
+    },
+
+    renderSection(containerEl, options = {}) {
+        const el = typeof containerEl === 'string' ? document.getElementById(containerEl) : containerEl;
+        if (!el) return;
+
+        const openAttr = options.open ? 'open' : '';
+        const containerClass = options.containerClass ? ` class="${options.containerClass}"` : '';
+        const titleText = options.titleText || '📊 Placement Planning';
+        const subtitleText = options.subtitleText || '';
+        const showNotice = options.showNotice ?? true;
+
+        let controlsHtml = options.controlsHtml || '';
+        if (!controlsHtml && options.showControls) {
+            controlsHtml = `
+                <select id="plan-snapshot-select" onchange="${options.onSnapshotChange || 'state.activePlanSnapshot = null;'}" style="max-width:280px; padding:6px 10px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px; font-weight:normal;"><option value="">Loading snapshots...</option></select>
+                <button class="btn primary" id="btn-plan-generate" onclick="event.stopPropagation(); document.getElementById('details-plan').open = true; ${options.onGenerate || 'generatePlan()'};">Generate Plan</button>
+            `;
+        }
+
+        const resultsStyleAttr = options.resultsStyle ? ` style="${options.resultsStyle}"` : '';
+        let resultsContent = options.placeholderHtml || '';
+        if (!resultsContent && options.placeholderText) {
+            const pClass = options.placeholderClass ? ` class="${options.placeholderClass}"` : '';
+            const pStyle = options.placeholderStyle ? ` style="${options.placeholderStyle}"` : (options.placeholderClass ? '' : ' style="text-align:center; color:var(--muted); padding:20px;"');
+            resultsContent = `<div${pClass}${pStyle}>${options.placeholderText}</div>`;
+        }
+
+        el.innerHTML = `
+            <details id="details-plan"${containerClass} ${openAttr}>
+                <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+                    <div class="summary-title">
+                        <span>${titleText}</span>
+                        <span class="summary-subtitle" id="plan-subtitle">${subtitleText}</span>
+                    </div>
+                    ${controlsHtml ? `<div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">${controlsHtml}</div>` : ''}
+                </summary>
+                <div class="content">
+                    ${showNotice ? '<div id="plan-notice" class="notice"></div>' : ''}
+                    <div id="plan-results"${resultsStyleAttr}>${resultsContent}</div>
+                </div>
+            </details>
+        `;
     }
 };
+
+window.Balancer.planner = window.Balancer.plan;

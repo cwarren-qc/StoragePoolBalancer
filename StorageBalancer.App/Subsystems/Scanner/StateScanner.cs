@@ -21,6 +21,8 @@ public class StateScanner
     private bool _isScanning;
     private CancellationTokenSource? _scanCancellation;
     private DateTime? _scannedAt;
+    private DateTime? _startedAt;
+    private DateTime? _completedAt;
     private string? _error;
     private string? _snapshotName;
     private string? _snapshotPath;
@@ -35,6 +37,12 @@ public class StateScanner
     {
         lock (_statusLock)
         {
+            TimeSpan? timeTaken = null;
+            if (_startedAt.HasValue)
+            {
+                timeTaken = (_completedAt ?? DateTime.UtcNow) - _startedAt.Value;
+            }
+
             return new ScanStatus(
                 _isScanning,
                 _scanCancellation?.IsCancellationRequested ?? false,
@@ -42,7 +50,10 @@ public class StateScanner
                 _error,
                 _snapshotName,
                 _snapshotPath,
-                _volumeProgress.Values.OrderBy(v => v.Alias).ToArray());
+                _volumeProgress.Values.OrderBy(v => v.Alias).ToArray(),
+                _startedAt,
+                _completedAt,
+                timeTaken);
         }
     }
 
@@ -56,6 +67,8 @@ public class StateScanner
             _isScanning = true;
             _scanCancellation = new CancellationTokenSource();
             _scannedAt = null;
+            _startedAt = DateTime.UtcNow;
+            _completedAt = null;
             _error = null;
             _snapshotName = snapshotName;
             _snapshotPath = snapshotPath;
@@ -118,6 +131,7 @@ public class StateScanner
             {
                 _isScanning = false;
                 _scannedAt = snapshot.ScannedAt;
+                _completedAt = DateTime.UtcNow;
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -125,6 +139,7 @@ public class StateScanner
             lock (_statusLock)
             {
                 _isScanning = false;
+                _completedAt = DateTime.UtcNow;
                 foreach (var alias in _volumeProgress.Keys)
                 {
                     UpdateProgress(alias, progress => progress.Status is VolumeScanStatus.Queued or VolumeScanStatus.Scanning
@@ -138,6 +153,7 @@ public class StateScanner
             lock (_statusLock)
             {
                 _isScanning = false;
+                _completedAt = DateTime.UtcNow;
                 _error = exception.Message;
 
                 foreach (var alias in _volumeProgress.Keys)
@@ -486,7 +502,10 @@ public record ScanStatus(
     string? Error,
     string? SnapshotName,
     string? SnapshotPath,
-    IReadOnlyCollection<VolumeScanProgress> Volumes);
+    IReadOnlyCollection<VolumeScanProgress> Volumes,
+    DateTime? StartedAt = null,
+    DateTime? CompletedAt = null,
+    TimeSpan? TimeTaken = null);
 
 public record VolumeScanProgress(
     string Alias,

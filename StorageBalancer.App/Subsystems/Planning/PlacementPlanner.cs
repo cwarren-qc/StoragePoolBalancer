@@ -185,7 +185,7 @@ public sealed class PlacementPlanner
         var finalPlacements = ctx.MatchRecords
             .Where(m => m.TotalSize > 0)
             .Select(m => {
-                PlacementLogic logic = PlacementLogic.Staying;
+                PlacementLogic logic = PlacementLogic.StayingInPlace;
                 if (m.MovedSize > 0)
                 {
                     if (m.Targets.Count > 1) logic = PlacementLogic.Splitting;

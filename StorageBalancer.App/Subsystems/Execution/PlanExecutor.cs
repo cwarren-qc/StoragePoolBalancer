@@ -99,17 +99,9 @@ public class PlanExecutor
 
             if (!string.IsNullOrWhiteSpace(status) && !string.Equals(status, "All", StringComparison.OrdinalIgnoreCase))
             {
-                FolderCleanupStatus? targetStatus = status switch
+                if (Enum.TryParse<FolderCleanupStatus>(status, true, out var targetStatus))
                 {
-                    var s when string.Equals(s, "Cleaning", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Cleaned", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Cleaning,
-                    var s when string.Equals(s, "Preserving", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Preserved", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "PreservedUnique", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Preserving,
-                    var s when string.Equals(s, "Keeping", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Kept", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "KeptWithData", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Keeping,
-                    _ => Enum.TryParse<FolderCleanupStatus>(status, true, out var p) ? p : null
-                };
-
-                if (targetStatus.HasValue)
-                {
-                    query = query.Where(a => a.Status == targetStatus.Value);
+                    query = query.Where(a => a.Status == targetStatus);
                 }
             }
 
@@ -480,7 +472,7 @@ public class PlanExecutor
         // a folder during the file copy process (which may take hours), we avoid re-creating it later.
         if (folderCleanup != null)
         {
-            foreach (var action in folderCleanup.Actions.Where(a => a.Status == FolderCleanupStatus.Cleaning || a.Status == FolderCleanupStatus.Preserving))
+            foreach (var action in folderCleanup.Actions.Where(a => a.Status == FolderCleanupStatus.Cleaning || a.Status == FolderCleanupStatus.PreservingUnique))
             {
                 ct.ThrowIfCancellationRequested();
 

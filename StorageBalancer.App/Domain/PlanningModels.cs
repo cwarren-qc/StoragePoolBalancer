@@ -56,47 +56,17 @@ public sealed record PlannedFileItem(
     long SizeOnDisk
 );
 
-[JsonConverter(typeof(PlacementLogicJsonConverter))]
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum PlacementLogic
 {
-    Staying,
-    Moving,
-    Splitting,
+    StayingInPlace,
     Consolidating,
-    MovingConsolidating
+    Moving,
+    MovingConsolidating,
+    Splitting
 }
 
-public sealed class PlacementLogicJsonConverter : JsonConverter<PlacementLogic>
-{
-    public override PlacementLogic Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var str = reader.GetString();
-        return str switch
-        {
-            "Staying" or "Stayed intact" or "Staying intact" => PlacementLogic.Staying,
-            "Moving" or "Moved" => PlacementLogic.Moving,
-            "Splitting" or "Split" => PlacementLogic.Splitting,
-            "Consolidating" or "Consolidated" => PlacementLogic.Consolidating,
-            "Moving/Consolidating" or "Moved/Consolidated" => PlacementLogic.MovingConsolidating,
-            _ => Enum.TryParse<PlacementLogic>(str, true, out var val) ? val : PlacementLogic.Staying
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, PlacementLogic value, JsonSerializerOptions options)
-    {
-        writer.WriteStringValue(value switch
-        {
-            PlacementLogic.Staying => "Staying",
-            PlacementLogic.Moving => "Moving",
-            PlacementLogic.Splitting => "Splitting",
-            PlacementLogic.Consolidating => "Consolidating",
-            PlacementLogic.MovingConsolidating => "Moving/Consolidating",
-            _ => value.ToString()
-        });
-    }
-}
-
-[JsonConverter(typeof(VolumeEligibilityStatusJsonConverter))]
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum VolumeEligibilityStatus
 {
     Included,
@@ -104,28 +74,7 @@ public enum VolumeEligibilityStatus
     IncompleteScan
 }
 
-public sealed class VolumeEligibilityStatusJsonConverter : JsonConverter<VolumeEligibilityStatus>
-{
-    public override VolumeEligibilityStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var str = reader.GetString();
-        return str switch
-        {
-            "Incomplete scan" => VolumeEligibilityStatus.IncompleteScan,
-            _ => Enum.TryParse<VolumeEligibilityStatus>(str, true, out var val) ? val : VolumeEligibilityStatus.Included
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, VolumeEligibilityStatus value, JsonSerializerOptions options)
-    {
-        writer.WriteStringValue(value switch
-        {
-            VolumeEligibilityStatus.IncompleteScan => "Incomplete scan",
-            _ => value.ToString()
-        });
-    }
-}
-
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum DeferredCopyReason
 {
     None,

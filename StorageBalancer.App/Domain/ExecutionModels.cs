@@ -6,41 +6,15 @@ using System.Text.Json.Serialization;
 
 namespace StorageBalancer.App.Domain;
 
-[JsonConverter(typeof(FolderCleanupStatusJsonConverter))]
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum FolderCleanupStatus
 {
-    Cleaning,
-    Preserving,
-    Keeping
+    PreservingUnique,
+    KeepingWithData,
+    Cleaning
 }
 
-public sealed class FolderCleanupStatusJsonConverter : JsonConverter<FolderCleanupStatus>
-{
-    public override FolderCleanupStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var str = reader.GetString();
-        return str switch
-        {
-            "Cleaning" or "Cleaned" => FolderCleanupStatus.Cleaning,
-            "Preserving" or "Preserved" or "PreservedUnique" => FolderCleanupStatus.Preserving,
-            "Keeping" or "Kept" or "KeptWithData" => FolderCleanupStatus.Keeping,
-            _ => Enum.TryParse<FolderCleanupStatus>(str, true, out var val) ? val : FolderCleanupStatus.Cleaning
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, FolderCleanupStatus value, JsonSerializerOptions options)
-    {
-        writer.WriteStringValue(value switch
-        {
-            FolderCleanupStatus.Cleaning => "Cleaning",
-            FolderCleanupStatus.Preserving => "Preserving",
-            FolderCleanupStatus.Keeping => "Keeping",
-            _ => value.ToString()
-        });
-    }
-}
-
-[JsonConverter(typeof(ExecutionPhaseJsonConverter))]
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExecutionPhase
 {
     Idle,
@@ -52,29 +26,7 @@ public enum ExecutionPhase
     Failed
 }
 
-public sealed class ExecutionPhaseJsonConverter : JsonConverter<ExecutionPhase>
-{
-    public override ExecutionPhase Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var str = reader.GetString();
-        return str switch
-        {
-            "Cleaning Folders" => ExecutionPhase.CleaningFolders,
-            _ => Enum.TryParse<ExecutionPhase>(str, true, out var val) ? val : ExecutionPhase.Idle
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, ExecutionPhase value, JsonSerializerOptions options)
-    {
-        writer.WriteStringValue(value switch
-        {
-            ExecutionPhase.CleaningFolders => "Cleaning Folders",
-            _ => value.ToString()
-        });
-    }
-}
-
-[JsonConverter(typeof(VolumeActivityStatusJsonConverter))]
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum VolumeActivityStatus
 {
     Idle,
@@ -82,28 +34,6 @@ public enum VolumeActivityStatus
     Writing,
     CleaningFolders,
     Complete
-}
-
-public sealed class VolumeActivityStatusJsonConverter : JsonConverter<VolumeActivityStatus>
-{
-    public override VolumeActivityStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
-    {
-        var str = reader.GetString();
-        return str switch
-        {
-            "Cleaning Folders" => VolumeActivityStatus.CleaningFolders,
-            _ => Enum.TryParse<VolumeActivityStatus>(str, true, out var val) ? val : VolumeActivityStatus.Idle
-        };
-    }
-
-    public override void Write(Utf8JsonWriter writer, VolumeActivityStatus value, JsonSerializerOptions options)
-    {
-        writer.WriteStringValue(value switch
-        {
-            VolumeActivityStatus.CleaningFolders => "Cleaning Folders",
-            _ => value.ToString()
-        });
-    }
 }
 
 public record ExecutionStartRequest(
