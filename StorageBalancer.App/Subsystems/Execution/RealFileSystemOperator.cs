@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -7,7 +8,7 @@ using StorageBalancer.App.Domain;
 
 namespace StorageBalancer.App.Subsystems.Execution;
 
-public class RealFileTransferOperator : IFileTransferOperator
+public class RealFileSystemOperator : IFileSystemOperator
 {
     public static readonly DateTime OrphanMarkerTimestampUtc = new DateTime(2006, 7, 8, 9, 10, 11, DateTimeKind.Utc);
     public const string TempFileExtension = ".spb-tmp";
@@ -15,7 +16,7 @@ public class RealFileTransferOperator : IFileTransferOperator
 
     private readonly bool _verifyCopies;
 
-    public RealFileTransferOperator(bool verifyCopies = true)
+    public RealFileSystemOperator(bool verifyCopies = true)
     {
         _verifyCopies = verifyCopies;
     }
@@ -193,5 +194,38 @@ public class RealFileTransferOperator : IFileTransferOperator
 
             throw;
         }
+    }
+
+    public Task DeleteFolderAsync(FolderCleanupTask task, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+
+        if (string.IsNullOrWhiteSpace(task.TargetFolderPath))
+            return Task.CompletedTask;
+
+        // Safety verification: Ensure the designated Primary volume contains this folder on disk
+        // before deleting the extra/redundant folder instance.
+        if (string.IsNullOrWhiteSpace(task.PrimaryFolderPath) || !Directory.Exists(task.PrimaryFolderPath))
+        {
+            return Task.CompletedTask;
+        }
+
+        if (!Directory.Exists(task.TargetFolderPath))
+            return Task.CompletedTask;
+
+        // Safety verification: Ensure the folder is truly empty (no files and no subdirectories)
+        if (Directory.EnumerateFileSystemEntries(task.TargetFolderPath).Any())
+            return Task.CompletedTask;
+
+        try
+        {
+            Directory.Delete(task.TargetFolderPath);
+        }
+        catch
+        {
+            // Best effort deletion
+        }
+
+        return Task.CompletedTask;
     }
 }

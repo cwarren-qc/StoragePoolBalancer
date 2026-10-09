@@ -26,7 +26,8 @@ public static class FolderCleanupSimulator
     private static string NormalizePath(string? path)
     {
         if (string.IsNullOrWhiteSpace(path)) return string.Empty;
-        return path.Trim().Replace('/', '\\').Trim('\\');
+        var trimmed = path.Trim().Replace('/', '\\').Trim('\\');
+        return trimmed == "." ? string.Empty : trimmed;
     }
 
     private static string GetParentPath(string path)
@@ -93,7 +94,7 @@ public static class FolderCleanupSimulator
         // 3. Collect all unique non-root relative folder paths across all volumes
         var allUniqueFolders = volumeTrees.Values
             .SelectMany(tree => tree.Keys)
-            .Where(p => !string.IsNullOrEmpty(p))
+            .Where(p => !string.IsNullOrEmpty(p) && p != ".")
             .Distinct(StringComparer.OrdinalIgnoreCase)
             // Sort bottom-up: deepest folders first (by directory depth descending, then length descending, then path)
             .OrderByDescending(p => p.Count(c => c == '\\'))

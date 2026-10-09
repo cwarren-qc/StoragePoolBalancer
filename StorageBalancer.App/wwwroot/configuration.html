@@ -997,7 +997,7 @@
                     execSpeed.textContent = '0 MB/s';
                     if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
                 } else if (status.phase === 'Cleaning Folders') {
-                    subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Simulating safe empty folder cleanup across volumes...';
+                    subtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Processing safe empty folder cleanup across volumes...';
                     execPct.textContent = '100%';
                     execTransferred.textContent = `${formatBytes(status.transferredBytes)} / ${formatBytes(status.totalBytes)}`;
                     execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;

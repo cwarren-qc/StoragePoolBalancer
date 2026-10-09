@@ -503,7 +503,7 @@ window.Balancer.plan = {
                             if (src.alias.toLowerCase() === targetAlias.toLowerCase()) {
                                 tooltip = `${escapeHtml(src.alias)} (Stayed in place): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
                             } else {
-                                tooltip = `${escapeHtml(src.alias)} (Moving to ${escapeHtml(targetAlias)}): ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
+                                tooltip = `${escapeHtml(src.alias)}: ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;
                             }
                         } else {
                             tooltip = `${escapeHtml(src.alias)}: ${formatBytes(src.size)} (${pct.toFixed(1)}%)`;

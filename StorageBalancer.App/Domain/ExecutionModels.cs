@@ -73,6 +73,14 @@ public record FolderCleanupAction(
     string Reason
 );
 
+public record FolderCleanupTask(
+    string RelativePath,
+    string VolumeAlias,
+    string PrimaryVolumeAlias,
+    string TargetFolderPath,
+    string PrimaryFolderPath
+);
+
 public record FolderCleanupSummary(
     int TotalFoldersEvaluated,
     int TotalFolderInstances,

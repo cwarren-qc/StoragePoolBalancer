@@ -427,7 +427,7 @@ window.Balancer.execution = {
                     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:14px;">
                         <div>
                             <strong style="font-size:14px; color:var(--deep); display:flex; align-items:center; gap:8px;">
-                                <span>📁</span> Empty Folder Cleanup Simulation
+                                <span>📁</span> Empty Folder Cleanup
                             </strong>
                             <div style="font-size:12px; color:var(--muted); margin-top:2px;">
                                 Evaluated ${totalEvaluated.toLocaleString()} logical folder paths across ${totalInstances.toLocaleString()} volume instances

@@ -334,8 +334,11 @@ public class PlanExecutor
                     string tgtDisk = diskMap.GetValueOrDefault(f.DestinationVolumeAlias, f.DestinationVolumeAlias);
                     string srcRoot = volumeRootMap.GetValueOrDefault(f.OriginalVolumeAlias, "");
                     string tgtRoot = volumeRootMap.GetValueOrDefault(f.DestinationVolumeAlias, "");
-                    string srcPath = !string.IsNullOrEmpty(srcRoot) ? Path.Combine(srcRoot, f.RelativePath, f.Name) : "";
-                    string tgtPath = !string.IsNullOrEmpty(tgtRoot) ? Path.Combine(tgtRoot, f.RelativePath, f.Name) : "";
+                    string cleanRelativePath = f.RelativePath.TrimStart('\\', '/');
+                    string srcPath = !string.IsNullOrEmpty(f.OriginalFullPath) && File.Exists(f.OriginalFullPath)
+                        ? f.OriginalFullPath
+                        : (!string.IsNullOrEmpty(srcRoot) ? Path.Combine(srcRoot, cleanRelativePath) : "");
+                    string tgtPath = !string.IsNullOrEmpty(tgtRoot) ? Path.Combine(tgtRoot, cleanRelativePath) : "";
 
                     moveItems.Add(new FileMoveTask(
                         f.Name,
@@ -440,18 +443,18 @@ public class PlanExecutor
             return;
         }
 
-        IFileTransferOperator transferOperator = isSimulation
-            ? new SimulatedFileTransferOperator(durationSeconds, _totalBytes, maxThreads)
-            : new RealFileTransferOperator(config.VerifyCopies);
+        IFileSystemOperator fsOperator = isSimulation
+            ? new SimulatedFileSystemOperator(durationSeconds, _totalBytes, maxThreads)
+            : new RealFileSystemOperator(config.VerifyCopies);
 
-        await ExecutePlanAsync(transferOperator, moveItems, snapshot, isSimulation, durationSeconds, maxThreads, ct).ConfigureAwait(false);
+        await ExecutePlanAsync(fsOperator, moveItems, snapshot, volumeRootMap, durationSeconds, maxThreads, ct).ConfigureAwait(false);
     }
 
     private async Task ExecutePlanAsync(
-        IFileTransferOperator transferOperator,
+        IFileSystemOperator fsOperator,
         List<FileMoveTask> tasks,
         PoolSnapshot snapshot,
-        bool isSimulation,
+        Dictionary<string, string> volumeRootMap,
         int durationSeconds,
         int maxThreads,
         CancellationToken ct)
@@ -469,7 +472,7 @@ public class PlanExecutor
         for (int i = 0; i < maxThreads; i++)
         {
             int workerId = i + 1;
-            workerTasks.Add(Task.Run(() => RunWorkerLoopAsync(workerId, transferOperator, pairQueues, lockManager, queueLock, ct), ct));
+            workerTasks.Add(Task.Run(() => RunWorkerLoopAsync(workerId, fsOperator, pairQueues, lockManager, queueLock, ct), ct));
         }
 
         try
@@ -493,6 +496,28 @@ public class PlanExecutor
 
         var folderCleanup = FolderCleanupSimulator.Simulate(snapshot, tasks);
 
+        foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned"))
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string volRoot = volumeRootMap.GetValueOrDefault(action.VolumeAlias, "");
+            string primaryRoot = volumeRootMap.GetValueOrDefault(action.PrimaryVolumeAlias, "");
+            string cleanRelPath = action.RelativePath.TrimStart('\\', '/');
+
+            string targetFolderPath = !string.IsNullOrEmpty(volRoot) ? Path.Combine(volRoot, cleanRelPath) : "";
+            string primaryFolderPath = !string.IsNullOrEmpty(primaryRoot) ? Path.Combine(primaryRoot, cleanRelPath) : "";
+
+            var cleanupTask = new FolderCleanupTask(
+                action.RelativePath,
+                action.VolumeAlias,
+                action.PrimaryVolumeAlias,
+                targetFolderPath,
+                primaryFolderPath
+            );
+
+            await fsOperator.DeleteFolderAsync(cleanupTask, ct).ConfigureAwait(false);
+        }
+
         lock (_stateLock)
         {
             _allFolderCleanupActions = folderCleanup.Actions;
@@ -511,7 +536,7 @@ public class PlanExecutor
 
     private async Task RunWorkerLoopAsync(
         int workerId,
-        IFileTransferOperator transferOperator,
+        IFileSystemOperator fsOperator,
         List<PairQueue> pairQueues,
         PhysicalDiskLockManager lockManager,
         object queueLock,
@@ -632,7 +657,7 @@ public class PlanExecutor
                     long taskBytesTransferred = 0;
                     var sw = Stopwatch.StartNew();
 
-                    await transferOperator.TransferFileAsync(currentTask, bytesTransferred =>
+                    await fsOperator.TransferFileAsync(currentTask, bytesTransferred =>
                     {
                         long delta = bytesTransferred - taskBytesTransferred;
                         if (delta > 0)

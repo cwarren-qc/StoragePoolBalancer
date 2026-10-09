@@ -5,11 +5,14 @@ using StorageBalancer.App.Domain;
 
 namespace StorageBalancer.App.Subsystems.Execution;
 
-public interface IFileTransferOperator
+public interface IFileSystemOperator
 {
     Task TransferFileAsync(
         FileMoveTask task,
         Action<long> onBytesTransferred,
         CancellationToken ct);
-}
 
+    Task DeleteFolderAsync(
+        FolderCleanupTask task,
+        CancellationToken ct);
+}

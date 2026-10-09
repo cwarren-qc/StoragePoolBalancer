@@ -5,13 +5,13 @@ using StorageBalancer.App.Domain;
 
 namespace StorageBalancer.App.Subsystems.Execution;
 
-public class SimulatedFileTransferOperator : IFileTransferOperator
+public class SimulatedFileSystemOperator : IFileSystemOperator
 {
     private readonly int _durationSeconds;
     private readonly long _totalBytes;
     private readonly int _maxThreads;
 
-    public SimulatedFileTransferOperator(int durationSeconds, long totalBytes, int maxThreads)
+    public SimulatedFileSystemOperator(int durationSeconds, long totalBytes, int maxThreads)
     {
         _durationSeconds = durationSeconds;
         _totalBytes = totalBytes;
@@ -64,5 +64,11 @@ public class SimulatedFileTransferOperator : IFileTransferOperator
             }
         }
     }
-}
 
+    public Task DeleteFolderAsync(FolderCleanupTask task, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        // Simulation mode: perform no modifications to disk
+        return Task.CompletedTask;
+    }
+}

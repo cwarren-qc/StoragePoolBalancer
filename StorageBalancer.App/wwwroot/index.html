@@ -187,6 +187,7 @@
                         <tr><td colspan="6" class="step-placeholder">Execution will begin automatically after the placement plan is generated.</td></tr>
                     </tbody>
                 </table>
+                <div id="exec-folder-cleanup-container" style="display:none; margin-top:20px;"></div>
             </div>
         </details>
     </main>
@@ -277,6 +278,43 @@
                     }
                 }
             } catch (e) {}
+
+            // Check if execution is currently running or completed on server
+            try {
+                const execStatus = await Balancer.execution.fetchStatus();
+                if (execStatus.isRunning) {
+                    appState.isRunning = true;
+                    btnStart.disabled = true;
+                    btnStart.style.display = 'none';
+                    btnCancel.style.display = 'inline-flex';
+                    btnCancel.disabled = false;
+                    setStepState(1, 'completed', 'Completed');
+                    setStepState(2, 'completed', 'Completed');
+                    setStepState(3, 'active', 'Transferring...');
+                    document.getElementById('details-exec').open = true;
+                    execSummaryBar.style.display = 'flex';
+                    runExecution(appState.activeSnapshotName, null);
+                } else if (execStatus.phase === 'Completed' || (execStatus.folderCleanup && execStatus.completedAt)) {
+                    setStepState(3, 'completed', 'Completed');
+                    execSubtitle.textContent = `Completed at ${new Date(execStatus.completedAt).toLocaleTimeString()}`;
+                    execSummaryBar.style.display = 'flex';
+                    execPct.textContent = '100%';
+                    execProgressFill.style.width = '100%';
+                    execTransferred.textContent = `${Balancer.formatBytes(execStatus.transferredBytes)} / ${Balancer.formatBytes(execStatus.totalBytes)}`;
+                    execFiles.textContent = `${(execStatus.transferredFiles || 0).toLocaleString()} / ${(execStatus.totalFiles || 0).toLocaleString()}`;
+                    execSpeed.textContent = '0 MB/s';
+                    const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
+                    if (execFoldersCleaned) {
+                        execFoldersCleaned.textContent = execStatus.folderCleanup ? (execStatus.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
+                    }
+                    const volumeColors = Balancer.getVolumeColorMap(appState.config?.volumes || []);
+                    Balancer.execution.renderTable(execStatus, execTbody, volumeColors);
+                    const folderContainer = document.getElementById('exec-folder-cleanup-container');
+                    if (folderContainer && execStatus.folderCleanup) {
+                        Balancer.execution.renderFolderCleanup(execStatus.folderCleanup, folderContainer);
+                    }
+                }
+            } catch (e) {}
         }
 
         async function onScanFinishedAfterReattach(status) {
@@ -290,6 +328,12 @@
             if (appState.isRunning) return;
             appState.isRunning = true;
             clearNotice();
+
+            const folderContainer = document.getElementById('exec-folder-cleanup-container');
+            if (folderContainer) {
+                folderContainer.style.display = 'none';
+                folderContainer.innerHTML = '';
+            }
 
             btnStart.disabled = true;
             btnStart.style.display = 'none';
@@ -351,7 +395,7 @@
 
                 setStepState(3, 'completed', 'Completed');
                 execSubtitle.textContent = 'Finished';
-                showNotice('Process completed successfully! Plan simulated and file balancing executed.', 'success');
+                showNotice('Process completed successfully! File balancing and empty folder cleanup executed.', 'success');
             } catch (err) {
                 showNotice(err.message || 'Process encountered an error.', 'error');
                 if (appState.currentStep === 2) setStepState(2, 'pending', 'Failed');
@@ -414,6 +458,12 @@
             const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
             if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
 
+            const folderContainer = document.getElementById('exec-folder-cleanup-container');
+            if (folderContainer) {
+                folderContainer.style.display = 'none';
+                folderContainer.innerHTML = '';
+            }
+
             return new Promise(async (resolve, reject) => {
                 try {
                     await Balancer.execution.start({
@@ -439,7 +489,7 @@
                             execSpeed.textContent = '0 MB/s';
                             if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
                         } else if (status.phase === 'Cleaning Folders') {
-                            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Cleaning empty folders across volumes...';
+                            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Processing safe empty folder cleanup across volumes...';
                             execPct.textContent = '100%';
                             execTransferred.textContent = `${Balancer.formatBytes(status.transferredBytes)} / ${Balancer.formatBytes(status.totalBytes)}`;
                             execFiles.textContent = `${(status.transferredFiles || 0).toLocaleString()} / ${(status.totalFiles || 0).toLocaleString()}`;
@@ -469,6 +519,9 @@
                                 execSpeed.textContent = '0 MB/s';
                                 if (execFoldersCleaned) {
                                     execFoldersCleaned.textContent = status.folderCleanup ? (status.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
+                                }
+                                if (folderContainer && status.folderCleanup) {
+                                    Balancer.execution.renderFolderCleanup(status.folderCleanup, folderContainer);
                                 }
                                 resolve();
                             }
