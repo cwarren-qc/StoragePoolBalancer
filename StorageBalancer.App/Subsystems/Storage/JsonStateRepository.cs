@@ -1,4 +1,6 @@
+using System;
 using System.IO;
+using System.IO.Compression;
 using System.Text.Json;
 using StorageBalancer.App.Domain;
 
@@ -24,10 +26,13 @@ public class JsonStateRepository
 
         try
         {
-            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                JsonSerializer.Serialize(stream, snapshot, _jsonOptions);
+            using (var fileStream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                using var gzipStream = new GZipStream(fileStream, CompressionLevel.Optimal, leaveOpen: true);
+                JsonSerializer.Serialize(gzipStream, snapshot, _jsonOptions);
+            }
 
-            File.Move(temporaryPath, filePath);
+            File.Move(temporaryPath, filePath + ".gz", overwrite: true);
         }
         finally
         {
@@ -42,6 +47,28 @@ public class JsonStateRepository
             return null;
 
         using var stream = File.OpenRead(filePath);
-        return JsonSerializer.Deserialize<PoolSnapshot>(stream, _jsonOptions);
+        bool isGzip = false;
+
+        // Auto-detect GZip compression via magic bytes 0x1F, 0x8B
+        if (stream.Length >= 2)
+        {
+            int b1 = stream.ReadByte();
+            int b2 = stream.ReadByte();
+            stream.Position = 0;
+            if (b1 == 0x1F && b2 == 0x8B)
+            {
+                isGzip = true;
+            }
+        }
+
+        if (isGzip)
+        {
+            using var gzipStream = new GZipStream(stream, CompressionMode.Decompress);
+            return JsonSerializer.Deserialize<PoolSnapshot>(gzipStream, _jsonOptions);
+        }
+        else
+        {
+            return JsonSerializer.Deserialize<PoolSnapshot>(stream, _jsonOptions);
+        }
     }
 }

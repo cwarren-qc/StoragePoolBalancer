@@ -66,7 +66,7 @@ public class StateScanner
                 _volumeProgress[vol.Alias] = new VolumeScanProgress(
                     vol.Alias,
                     vol.Disk ?? string.Empty,
-                    "Queued",
+                    VolumeScanStatus.Queued,
                     string.Empty,
                     0, 0, 0, null,
                     ImmutableList<ScanIssue>.Empty);
@@ -127,8 +127,8 @@ public class StateScanner
                 _isScanning = false;
                 foreach (var alias in _volumeProgress.Keys)
                 {
-                    UpdateProgress(alias, progress => progress.Status is "Queued" or "Scanning"
-                        ? progress with { Status = "Cancelled", CurrentPath = string.Empty }
+                    UpdateProgress(alias, progress => progress.Status is VolumeScanStatus.Queued or VolumeScanStatus.Scanning
+                        ? progress with { Status = VolumeScanStatus.Cancelled, CurrentPath = string.Empty }
                         : progress);
                 }
             }
@@ -142,8 +142,8 @@ public class StateScanner
 
                 foreach (var alias in _volumeProgress.Keys)
                 {
-                    UpdateProgress(alias, progress => progress.Status == "Scanning"
-                        ? progress with { Status = "Failed", Error = exception.Message }
+                    UpdateProgress(alias, progress => progress.Status == VolumeScanStatus.Scanning
+                        ? progress with { Status = VolumeScanStatus.Failed, Error = exception.Message }
                         : progress);
                 }
             }
@@ -170,7 +170,7 @@ public class StateScanner
         foreach (var volConfig in volumesInGroup)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            UpdateProgress(volConfig.Alias, progress => progress with { Status = "Scanning", CurrentPath = volConfig.MountPoint });
+            UpdateProgress(volConfig.Alias, progress => progress with { Status = VolumeScanStatus.Scanning, CurrentPath = volConfig.MountPoint });
 
             var issues = new List<SnapshotIssue>();
             DirectoryInfo? scanRoot = null;
@@ -219,7 +219,7 @@ public class StateScanner
                 issues.ToImmutableList(),
                 folders));
 
-            UpdateProgress(volConfig.Alias, progress => progress with { Status = "Complete", CurrentPath = string.Empty });
+            UpdateProgress(volConfig.Alias, progress => progress with { Status = VolumeScanStatus.Complete, CurrentPath = string.Empty });
         }
 
         Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Finished Disk Group: {diskName}");
@@ -468,6 +468,17 @@ public class StateScanner
     }
 }
 
+[System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+public enum VolumeScanStatus
+{
+    Ready,
+    Queued,
+    Scanning,
+    Complete,
+    Cancelled,
+    Failed
+}
+
 public record ScanStatus(
     bool IsScanning,
     bool IsCancellationRequested,
@@ -480,7 +491,7 @@ public record ScanStatus(
 public record VolumeScanProgress(
     string Alias,
     string DiskName,
-    string Status,
+    VolumeScanStatus Status,
     string CurrentPath,
     long FilesScanned,
     long FoldersScanned,

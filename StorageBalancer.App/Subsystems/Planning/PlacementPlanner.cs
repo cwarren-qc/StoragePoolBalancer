@@ -115,7 +115,7 @@ public sealed class PlacementPlanner
             string rootChunk = CleanRootChunkName(null, kvp.Key.RelativePath);
             foreach (var copy in kvp.Value)
             {
-                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, "None", first ? unmatchedRecord : duplicateRecord, rootChunk, first ? 0 : dupIdx++));
+                ctx.Deferred.Add(new DeferredCopy(kvp.Key, copy, DeferredCopyReason.None, first ? unmatchedRecord : duplicateRecord, rootChunk, first ? 0 : dupIdx++));
                 first = false;
             }
         }
@@ -124,8 +124,8 @@ public sealed class PlacementPlanner
         ctx.MatchRecords.Add(unmatchedRecord);
 
         // 1. Separate deferred copies by category
-        var fillerDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == "Filler Placement").ToList();
-        var unmatchedDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == "None").ToList();
+        var fillerDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == DeferredCopyReason.FillerPlacement).ToList();
+        var unmatchedDeferred = ctx.Deferred.Where(d => d.CopyIndex == 0 && d.Reason == DeferredCopyReason.None).ToList();
         var duplicateDeferred = ctx.Deferred.Where(d => d.CopyIndex > 0).ToList();
 
         var fillerAllowedTargets = (filler?.AllowedVolumeAliases != null && filler.AllowedVolumeAliases.Count > 0 && !filler.AllowedVolumeAliases.Contains("*"))
@@ -185,16 +185,18 @@ public sealed class PlacementPlanner
         var finalPlacements = ctx.MatchRecords
             .Where(m => m.TotalSize > 0)
             .Select(m => {
-                string logic = "Stayed intact";
+                PlacementLogic logic = PlacementLogic.Staying;
                 if (m.MovedSize > 0)
                 {
-                    if (m.Targets.Count > 1) logic = "Split";
-                    else if (m.Sources.Count == 1 && m.Targets.Count == 1) logic = "Moved";
+                    if (m.Targets.Count > 1) logic = PlacementLogic.Splitting;
+                    else if (m.Sources.Count == 1 && m.Targets.Count == 1) logic = PlacementLogic.Moving;
                     else if (m.Sources.Count > 1 && m.Targets.Count == 1)
                     {
                         var target = m.Targets.Keys.First();
                         var biggestSource = m.Sources.OrderByDescending(kv => kv.Value).FirstOrDefault().Key;
-                        logic = string.Equals(target, biggestSource, StringComparison.OrdinalIgnoreCase) ? "Consolidated" : "Moved/Consolidated";
+                        logic = string.Equals(target, biggestSource, StringComparison.OrdinalIgnoreCase) 
+                            ? PlacementLogic.Consolidating 
+                            : PlacementLogic.MovingConsolidating;
                     }
                 }
 
@@ -493,7 +495,7 @@ public sealed class PlacementPlanner
         foreach (var copy in copies)
         {
             if (copy == primaryCopy) continue;
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Deferred Duplicate", duplicateRecord, rootChunk, dupIdx++));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, DeferredCopyReason.DeferredDuplicate, duplicateRecord, rootChunk, dupIdx++));
         }
     }
 
@@ -507,7 +509,7 @@ public sealed class PlacementPlanner
         int dupIdx = 1;
         foreach (var copy in copies)
         {
-            ctx.Deferred.Add(new DeferredCopy(file, copy, "Filler Placement", isPrimary ? record : duplicateRecord, rootChunk, isPrimary ? 0 : dupIdx++));
+            ctx.Deferred.Add(new DeferredCopy(file, copy, DeferredCopyReason.FillerPlacement, isPrimary ? record : duplicateRecord, rootChunk, isPrimary ? 0 : dupIdx++));
             isPrimary = false;
         }
     }
@@ -866,9 +868,15 @@ public sealed class PlacementPlanner
                 .Select(pair => new VolumeProvenance(pair.Key.Source, pair.Value))
                 .OrderByDescending(item => item.Size).ToImmutableArray();
 
+            var status = isEligible
+                ? VolumeEligibilityStatus.Included
+                : volume.IsComplete
+                    ? VolumeEligibilityStatus.Unavailable
+                    : VolumeEligibilityStatus.IncompleteScan;
+
             summaries.Add(new VolumePlanSummary(
                 volume.Alias, volume.Disk, volume.MountPoint, volume.Capacity, finalSizes.GetValueOrDefault(volume.Alias),
-                isEligible, isEligible ? "Included" : volume.IsComplete ? "Unavailable" : "Incomplete scan", provenance,
+                isEligible, status, provenance,
                 volume.OtherItemsSizeOnDisk,
                 filesMovedOut.GetValueOrDefault(volume.Alias),
                 filesMovedIn.GetValueOrDefault(volume.Alias)));
@@ -1144,5 +1152,5 @@ public sealed class PlacementPlanner
         public long OtherItemsSizeOnDisk { get; } = otherItemsSizeOnDisk;
     }
 
-    private sealed record DeferredCopy(PlanningFile File, PlanningFileCopy Copy, string Reason, MatchRecord? Record, string RootChunkName = "", int CopyIndex = 0);
+    private sealed record DeferredCopy(PlanningFile File, PlanningFileCopy Copy, DeferredCopyReason Reason, MatchRecord? Record, string RootChunkName = "", int CopyIndex = 0);
 }

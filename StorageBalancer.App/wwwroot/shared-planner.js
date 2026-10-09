@@ -94,81 +94,6 @@ window.Balancer.plan = {
             ).join('');
         }
 
-        containerEl.innerHTML = `
-            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px;">
-                <span style="font-size:15px;"><strong>${formatBytes(totalMoved)}</strong> to transfer</span>
-                <span style="font-size:12px; color:var(--muted);">Snapshot scanned: ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
-            </div>
-            ${warningsHtml}
-
-            <!-- COLLAPSIBLE SECTION 1: VOLUME UTILIZATION -->
-            <details class="sub-details" id="plan-details-volumes" ${sectionsOpen ? 'open' : ''}>
-                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:700;" title="Volume storage capacity and simulated utilization before and after balancing">Volume Utilization</span>
-                </summary>
-                <div class="sub-content" style="padding:16px 12px; overflow-x:auto;">
-                    <table class="scan-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 75px;" title="Configured volume alias">Volume</th>
-                                <th style="width: 85px; text-align:right;" title="Total usable storage capacity of this volume">Capacity</th>
-                                <th style="width: auto; padding-left: 12px; padding-right: 12px;" title="Two proportional capacity bars: START (-OUT) shows current files and outgoing moves; END (+IN) shows target files and incoming moves. Free space exceeding 30% has a cut break.">Distribution (Start vs End)</th>
-                                <th style="width: 85px; text-align:right;" title="Top: Initial used size before balancing. Bottom: Final projected size after balancing.">Used Size</th>
-                                <th style="width: 60px; text-align:right;" title="Top: Initial % capacity used. Bottom: Final % capacity used.">% Util</th>
-                                <th style="width: 95px; text-align:right;" title="Top: Outgoing data moving to other volumes (-OUT). Bottom: Incoming data moving from other volumes (+IN).">Data Moving</th>
-                                <th style="width: 90px; text-align:right;" title="Top: Files moving out to other volumes (-OUT). Bottom: Files moving in from other volumes (+IN).">Files Moving</th>
-                            </tr>
-                        </thead>
-                        <tbody class="plan-volume-tbody"></tbody>
-                    </table>
-                </div>
-            </details>
-
-            <!-- COLLAPSIBLE SECTION 2: PATH PLACEMENTS -->
-            <details class="sub-details" id="plan-details-placements" ${sectionsOpen ? 'open' : ''} style="margin-top:16px;">
-                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:700;" title="Folder placement decisions and file balancing rules">Path Placements</span>
-                    <label class="plan-stayed-intact-toggle" style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement" onclick="event.stopPropagation();">
-                        <input type="checkbox" class="plan-cb-intact" ${state.showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
-                    </label>
-                </summary>
-                <div class="sub-content" style="padding:16px 12px; overflow-x:auto;">
-                    <table class="plan-table" id="placement-table">
-                        <thead>
-                            <tr>
-                                <th class="sortable" data-sort="order" style="width: 4%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
-                                <th class="sortable" data-sort="path" style="width: 38%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
-                                <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
-                                <th class="sortable" data-sort="target" style="width: 12%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
-                                <th class="sortable" data-sort="size" style="width: 10%; text-align:right;" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
-                                <th class="sortable" data-sort="moved" style="width: 11%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
-                                <th style="width: 13%; text-align:left;" title="Visual distribution showing folder data sources. Leftmost segment shows data staying on the target volume; other segments show incoming moves from source volumes.">Distribution</th>
-                            </tr>
-                        </thead>
-                        <tbody class="plan-placement-tbody"></tbody>
-                    </table>
-                </div>
-            </details>
-            <!-- COLLAPSIBLE SECTION 3: EMPTY FOLDER CLEANUP -->
-            <details class="sub-details" id="plan-details-cleanup" ${sectionsOpen ? 'open' : ''} style="margin-top:16px; ${plan.folderCleanup ? '' : 'display:none;'}">
-                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:700;" title="Safe empty folder cleanup and migration planned across pool volumes">Empty Folder Cleanup</span>
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span class="state-pill state-complete" style="font-size:11px; padding:2px 8px; background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;" title="Empty folder copies on non-primary volumes that will be cleaned up">
-                            Cleaned: ${(plan.folderCleanup?.cleanedCount || 0).toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Empty folders with no other copies that will be preserved on the primary volume">
-                            Preserved: ${(plan.folderCleanup?.preservedUniqueCount || 0).toLocaleString()}
-                        </span>
-                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="Folders containing active files or subfolders that will remain in place">
-                            Kept: ${(plan.folderCleanup?.keptWithDataCount || 0).toLocaleString()}
-                        </span>
-                    </div>
-                </summary>
-                <div class="sub-content" id="plan-folder-cleanup-container" style="padding:16px 12px; overflow-x:auto;"></div>
-            </details>
-        `;
-
         function computeVolumeTransfers(volumes) {
             const map = new Map();
             (volumes || []).forEach(v => {
@@ -206,6 +131,181 @@ window.Balancer.plan = {
 
             return map;
         }
+
+        const volumes = plan.volumes || [];
+        const volumeTransfers = computeVolumeTransfers(volumes);
+
+        let totalCapacity = 0;
+        let totalStartUsed = 0;
+        let totalFinalUsed = 0;
+        let totalFilesMoving = 0;
+        let overCapacityCount = 0;
+        let volumesWithMoves = 0;
+
+        const startPcts = [];
+        const finalPcts = [];
+
+        volumes.forEach(v => {
+            const transferData = volumeTransfers.get(v.alias) || { startSize: 0, outgoing: [], incoming: [] };
+            const cap = v.capacity || 0;
+            const startUsed = transferData.startSize || 0;
+            const finalUsed = v.finalSize || 0;
+
+            totalCapacity += cap;
+            totalStartUsed += startUsed;
+            totalFinalUsed += finalUsed;
+
+            const filesIn = v.filesMovedIn || v.FilesMovedIn || 0;
+            totalFilesMoving += filesIn;
+
+            if (cap > 0) {
+                const sPct = (startUsed / cap) * 100;
+                const fPct = (finalUsed / cap) * 100;
+                startPcts.push({ alias: v.alias, pct: sPct });
+                finalPcts.push({ alias: v.alias, pct: fPct });
+                if (fPct > 100) overCapacityCount++;
+            }
+
+            if ((transferData.outgoing && transferData.outgoing.length > 0) ||
+                (transferData.incoming && transferData.incoming.length > 0)) {
+                volumesWithMoves++;
+            }
+        });
+
+        const poolFinalPct = totalCapacity > 0 ? (totalFinalUsed / totalCapacity) * 100 : 0;
+        const poolStartPct = totalCapacity > 0 ? (totalStartUsed / totalCapacity) * 100 : 0;
+
+        const minFinalPct = finalPcts.length ? Math.min(...finalPcts.map(x => x.pct)) : 0;
+        const maxFinalPct = finalPcts.length ? Math.max(...finalPcts.map(x => x.pct)) : 0;
+        const minStartPct = startPcts.length ? Math.min(...startPcts.map(x => x.pct)) : 0;
+        const maxStartPct = startPcts.length ? Math.max(...startPcts.map(x => x.pct)) : 0;
+
+        const placements = plan.placements || [];
+        let pathsMovingCount = 0;
+        let pathsIntactCount = 0;
+        let movedCount = 0;
+        let consolidatedCount = 0;
+        let splitCount = 0;
+        let intactSize = 0;
+
+        placements.forEach(p => {
+            if (p.logicApplied === 'Stayed intact' || (p.sizeMoved === 0 && p.logicApplied !== 'Consolidated' && p.logicApplied !== 'Split')) {
+                pathsIntactCount++;
+                intactSize += (p.sizeOnDisk || 0);
+            } else {
+                pathsMovingCount++;
+                if (p.logicApplied === 'Consolidated' || p.logicApplied === 'Moved/Consolidated') {
+                    consolidatedCount++;
+                } else if (p.logicApplied === 'Split') {
+                    splitCount++;
+                } else {
+                    movedCount++;
+                }
+            }
+        });
+        const totalPathsCount = placements.length;
+
+        containerEl.innerHTML = `
+            <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--line); padding-bottom:12px; margin-bottom:16px;">
+                <span style="font-size:15px;"><strong>${formatBytes(totalMoved)}</strong> to transfer</span>
+                <span style="font-size:12px; color:var(--muted);">Snapshot scanned: ${new Date(plan.snapshotScannedAt).toLocaleString()}</span>
+            </div>
+            ${warningsHtml}
+
+            <!-- COLLAPSIBLE SECTION 1: VOLUME UTILIZATION -->
+            <details class="sub-details" id="plan-details-volumes" ${sectionsOpen ? 'open' : ''}>
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700;" title="Volume storage capacity and simulated utilization before and after balancing">Volume Utilization</span>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        ${overCapacityCount > 0 ? `
+                            <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#fde8e8; color:#9b1c1c; border:1px solid #f8b4b4;" title="Warning: ${overCapacityCount} volume(s) projected to exceed 100% capacity!">
+                                Over Capacity: ${overCapacityCount}
+                            </span>
+                        ` : ''}
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Total pool utilization: ${formatBytes(totalFinalUsed)} used of ${formatBytes(totalCapacity)} capacity (${poolFinalPct.toFixed(1)}%) across ${volumes.length} volume(s)">
+                            Pool: ${poolFinalPct.toFixed(1)}%
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f4f0fa; color:#5b3296; border:1px solid #dfd4f2;" title="Projected volume utilization spread: ${minFinalPct.toFixed(1)}% to ${maxFinalPct.toFixed(1)}% (initial: ${minStartPct.toFixed(1)}% to ${maxStartPct.toFixed(1)}%)">
+                            Spread: ${minFinalPct.toFixed(0)}% – ${maxFinalPct.toFixed(0)}%
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${totalFilesMoving > 0 ? 'background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;' : 'background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;'}" title="${totalFilesMoving.toLocaleString()} files moving across ${volumesWithMoves} of ${volumes.length} volume(s)">
+                            Files Moving: ${totalFilesMoving.toLocaleString()}
+                        </span>
+                    </div>
+                </summary>
+                <div class="sub-content" style="padding:16px 12px; overflow-x:auto;">
+                    <table class="scan-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 75px;" title="Configured volume alias">Volume</th>
+                                <th style="width: 85px; text-align:right;" title="Total usable storage capacity of this volume">Capacity</th>
+                                <th style="width: auto; padding-left: 12px; padding-right: 12px;" title="Two proportional capacity bars: START (-OUT) shows current files and outgoing moves; END (+IN) shows target files and incoming moves. Free space exceeding 30% has a cut break.">Distribution (Start vs End)</th>
+                                <th style="width: 85px; text-align:right;" title="Top: Initial used size before balancing. Bottom: Final projected size after balancing.">Used Size</th>
+                                <th style="width: 60px; text-align:right;" title="Top: Initial % capacity used. Bottom: Final % capacity used.">% Util</th>
+                                <th style="width: 95px; text-align:right;" title="Top: Outgoing data moving to other volumes (-OUT). Bottom: Incoming data moving from other volumes (+IN).">Data Moving</th>
+                                <th style="width: 90px; text-align:right;" title="Top: Files moving out to other volumes (-OUT). Bottom: Files moving in from other volumes (+IN).">Files Moving</th>
+                            </tr>
+                        </thead>
+                        <tbody class="plan-volume-tbody"></tbody>
+                    </table>
+                </div>
+            </details>
+
+            <!-- COLLAPSIBLE SECTION 2: PATH PLACEMENTS -->
+            <details class="sub-details" id="plan-details-placements" ${sectionsOpen ? 'open' : ''} style="margin-top:16px;">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700;" title="Folder placement decisions and file balancing rules">Path Placements</span>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; ${pathsMovingCount > 0 ? 'background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;' : 'background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;'}" title="${pathsMovingCount.toLocaleString()} paths require file movements (${formatBytes(totalMoved)} total): ${movedCount} moved, ${consolidatedCount} consolidated, ${splitCount} split">
+                            Moving: ${pathsMovingCount.toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="${pathsIntactCount.toLocaleString()} paths stay intact (${formatBytes(intactSize)} already reside on target volumes)">
+                            Intact: ${pathsIntactCount.toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="${totalPathsCount.toLocaleString()} total paths evaluated (${pathsMovingCount} moving, ${pathsIntactCount} intact)">
+                            Total: ${totalPathsCount.toLocaleString()}
+                        </span>
+                        <label class="plan-stayed-intact-toggle" style="font-size:12px; display:flex; align-items:center; gap:6px; cursor:pointer; color:var(--ink); font-weight:600; margin-left:4px;" title="Toggle visibility of paths where all files already reside on target volumes and require no file movement" onclick="event.stopPropagation();">
+                            <input type="checkbox" class="plan-cb-intact" ${state.showStayedIntact ? 'checked' : ''}> Show 'Stayed intact'
+                        </label>
+                    </div>
+                </summary>
+                <div class="sub-content" style="padding:16px 12px; overflow-x:auto;">
+                    <table class="plan-table" id="placement-table">
+                        <thead>
+                            <tr>
+                                <th class="sortable" data-sort="order" style="width: 4%;" title="Rule evaluation order. Lower numbers run first; '-' denotes unplaced, duplicate, or catch-all files. Click to sort.">#</th>
+                                <th class="sortable" data-sort="path" style="width: 38%;" title="Relative pool folder path or category. Special categories include ** Duplicate, ** Unmatched, and <Pool Root>. Click to sort.">Path</th>
+                                <th class="sortable" data-sort="logic" style="width: 12%;" title="Placement strategy applied: Stayed intact, Moved, Split, Consolidated, or Moved/Consolidated. Click to sort.">Logic applied</th>
+                                <th class="sortable" data-sort="target" style="width: 12%;" title="Destination volume(s) assigned to store files for this path. Click to sort.">Target volume</th>
+                                <th class="sortable" data-sort="size" style="width: 10%; text-align:right;" title="Total size on disk of all files under this path. Click to sort.">Total Size</th>
+                                <th class="sortable" data-sort="moved" style="width: 11%; text-align:right;" title="Amount of data that must be transferred between physical volumes to satisfy placement rules. Click to sort.">Size Moved</th>
+                                <th style="width: 13%; text-align:left;" title="Visual distribution showing folder data sources. Leftmost segment shows data staying on the target volume; other segments show incoming moves from source volumes.">Distribution</th>
+                            </tr>
+                        </thead>
+                        <tbody class="plan-placement-tbody"></tbody>
+                    </table>
+                </div>
+            </details>
+            <!-- COLLAPSIBLE SECTION 3: EMPTY FOLDER CLEANUP -->
+            <details class="sub-details" id="plan-details-cleanup" ${sectionsOpen ? 'open' : ''} style="margin-top:16px; ${plan.folderCleanup ? '' : 'display:none;'}">
+                <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-weight:700;" title="Safe empty folder cleanup and migration planned across pool volumes">Empty Folder Cleanup</span>
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span class="state-pill state-complete" style="font-size:11px; padding:2px 8px; background:#eaf8ef; color:#1b6e32; border:1px solid #c2e9cb;" title="Empty folder copies on non-primary volumes that will be cleaned up">
+                            Cleaned: ${(plan.folderCleanup?.cleanedCount || 0).toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#edf4fc; color:#185fa5; border:1px solid #c7ddf5;" title="Empty folders with no other copies that will be preserved on the primary volume">
+                            Preserved: ${(plan.folderCleanup?.preservedUniqueCount || 0).toLocaleString()}
+                        </span>
+                        <span class="state-pill" style="font-size:11px; padding:2px 8px; background:#f3f4f2; color:#5b655f; border:1px solid #d8ddd6;" title="Folders containing active files or subfolders that will remain in place">
+                            Kept: ${(plan.folderCleanup?.keptWithDataCount || 0).toLocaleString()}
+                        </span>
+                    </div>
+                </summary>
+                <div class="sub-content" id="plan-folder-cleanup-container" style="padding:16px 12px; overflow-x:auto;"></div>
+            </details>
+        `;
 
         function renderVolumeDualBars(startSegments, startUsed, endSegments, endUsed, capacity, volumeColors) {
             if (capacity <= 0) {

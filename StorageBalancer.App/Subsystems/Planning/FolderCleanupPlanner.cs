@@ -254,7 +254,7 @@ public static class FolderCleanupPlanner
                         folderPath,
                         primaryVolume,
                         primaryVolume,
-                        "PreservedUnique",
+                        FolderCleanupStatus.Preserving,
                         $"Designated Primary: empty folder migrated to {primaryVolume} per placement rule/consolidation"
                     ));
                 }
@@ -266,9 +266,9 @@ public static class FolderCleanupPlanner
                         folderPath,
                         primaryVolume,
                         primaryVolume,
-                        "PreservedUnique",
+                        FolderCleanupStatus.Preserving,
                         volumesWithFolder.Count == 1
-                            ? "Preserved: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
+                            ? "Preserving: only copy in the entire pool (prevents removing logical folder from DrivePool view)"
                             : "Designated Primary: kept so logical empty folder remains visible in merged view"
                     ));
                 }
@@ -293,7 +293,7 @@ public static class FolderCleanupPlanner
                             folderPath,
                             vol,
                             primaryVolume,
-                            "KeptWithData",
+                            FolderCleanupStatus.Keeping,
                             "Primary copy: active files or subdirectories remain on this volume"
                         ));
                     }
@@ -308,8 +308,8 @@ public static class FolderCleanupPlanner
                         folderPath,
                         vol,
                         primaryVolume,
-                        "KeptWithData",
-                        "Kept: volume still contains active files or subdirectories"
+                        FolderCleanupStatus.Keeping,
+                        "Keeping: volume still contains active files or subdirectories"
                     ));
                 }
                 else
@@ -320,8 +320,8 @@ public static class FolderCleanupPlanner
                         folderPath,
                         vol,
                         primaryVolume,
-                        "Cleaned",
-                        $"Cleaned: redundant empty folder safely removed; verified primary copy on {primaryVolume}"
+                        FolderCleanupStatus.Cleaning,
+                        $"Cleaning: redundant empty folder safely removed; verified primary copy on {primaryVolume}"
                     ));
 
                     // Remove this folder from volume `vol`

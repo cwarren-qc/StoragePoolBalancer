@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Immutable;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace StorageBalancer.App.Domain;
 
@@ -54,10 +56,87 @@ public sealed record PlannedFileItem(
     long SizeOnDisk
 );
 
+[JsonConverter(typeof(PlacementLogicJsonConverter))]
+public enum PlacementLogic
+{
+    Staying,
+    Moving,
+    Splitting,
+    Consolidating,
+    MovingConsolidating
+}
+
+public sealed class PlacementLogicJsonConverter : JsonConverter<PlacementLogic>
+{
+    public override PlacementLogic Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var str = reader.GetString();
+        return str switch
+        {
+            "Staying" or "Stayed intact" or "Staying intact" => PlacementLogic.Staying,
+            "Moving" or "Moved" => PlacementLogic.Moving,
+            "Splitting" or "Split" => PlacementLogic.Splitting,
+            "Consolidating" or "Consolidated" => PlacementLogic.Consolidating,
+            "Moving/Consolidating" or "Moved/Consolidated" => PlacementLogic.MovingConsolidating,
+            _ => Enum.TryParse<PlacementLogic>(str, true, out var val) ? val : PlacementLogic.Staying
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, PlacementLogic value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value switch
+        {
+            PlacementLogic.Staying => "Staying",
+            PlacementLogic.Moving => "Moving",
+            PlacementLogic.Splitting => "Splitting",
+            PlacementLogic.Consolidating => "Consolidating",
+            PlacementLogic.MovingConsolidating => "Moving/Consolidating",
+            _ => value.ToString()
+        });
+    }
+}
+
+[JsonConverter(typeof(VolumeEligibilityStatusJsonConverter))]
+public enum VolumeEligibilityStatus
+{
+    Included,
+    Unavailable,
+    IncompleteScan
+}
+
+public sealed class VolumeEligibilityStatusJsonConverter : JsonConverter<VolumeEligibilityStatus>
+{
+    public override VolumeEligibilityStatus Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        var str = reader.GetString();
+        return str switch
+        {
+            "Incomplete scan" => VolumeEligibilityStatus.IncompleteScan,
+            _ => Enum.TryParse<VolumeEligibilityStatus>(str, true, out var val) ? val : VolumeEligibilityStatus.Included
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, VolumeEligibilityStatus value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value switch
+        {
+            VolumeEligibilityStatus.IncompleteScan => "Incomplete scan",
+            _ => value.ToString()
+        });
+    }
+}
+
+public enum DeferredCopyReason
+{
+    None,
+    DeferredDuplicate,
+    FillerPlacement
+}
+
 public sealed record PlannedPlacement(
     int Order,
     string RelativePath,
-    string LogicApplied,
+    PlacementLogic LogicApplied,
     ImmutableArray<VolumeProvenance> Targets,
     long SizeOnDisk,
     long SizeMoved,
@@ -76,7 +155,7 @@ public sealed record VolumePlanSummary(
     long Capacity,
     long FinalSize,
     bool IsEligible,
-    string Status,
+    VolumeEligibilityStatus Status,
     ImmutableArray<VolumeProvenance> Provenance,
     long OtherItemsSizeOnDisk = 0,
     long FilesMovedOut = 0,

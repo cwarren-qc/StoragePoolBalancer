@@ -31,7 +31,7 @@ public class PlanExecutor
     private long _transferredBytes;
     private long _totalFiles;
     private long _transferredFiles;
-    private string _phase = "Idle";
+    private ExecutionPhase _phase = ExecutionPhase.Idle;
     private FolderCleanupSummary? _folderCleanup;
     private ImmutableList<FolderCleanupAction> _allFolderCleanupActions = ImmutableList<FolderCleanupAction>.Empty;
 
@@ -99,7 +99,18 @@ public class PlanExecutor
 
             if (!string.IsNullOrWhiteSpace(status) && !string.Equals(status, "All", StringComparison.OrdinalIgnoreCase))
             {
-                query = query.Where(a => string.Equals(a.Status, status, StringComparison.OrdinalIgnoreCase));
+                FolderCleanupStatus? targetStatus = status switch
+                {
+                    var s when string.Equals(s, "Cleaning", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Cleaned", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Cleaning,
+                    var s when string.Equals(s, "Preserving", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Preserved", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "PreservedUnique", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Preserving,
+                    var s when string.Equals(s, "Keeping", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "Kept", StringComparison.OrdinalIgnoreCase) || string.Equals(s, "KeptWithData", StringComparison.OrdinalIgnoreCase) => FolderCleanupStatus.Keeping,
+                    _ => Enum.TryParse<FolderCleanupStatus>(status, true, out var p) ? p : null
+                };
+
+                if (targetStatus.HasValue)
+                {
+                    query = query.Where(a => a.Status == targetStatus.Value);
+                }
             }
 
             if (!string.IsNullOrWhiteSpace(search))
@@ -143,7 +154,7 @@ public class PlanExecutor
             _startedAt = DateTime.UtcNow;
             _completedAt = null;
             _error = null;
-            _phase = "Preparing";
+            _phase = ExecutionPhase.Preparing;
             _folderCleanup = null;
             _allFolderCleanupActions = ImmutableList<FolderCleanupAction>.Empty;
 
@@ -186,7 +197,7 @@ public class PlanExecutor
                         _error = "Execution was cancelled by the user.";
                         _completedAt = DateTime.UtcNow;
                         _isRunning = false;
-                        _phase = "Cancelled";
+                        _phase = ExecutionPhase.Cancelled;
                     }
                 }
                 catch (Exception ex)
@@ -196,7 +207,7 @@ public class PlanExecutor
                         _error = ex.Message;
                         _completedAt = DateTime.UtcNow;
                         _isRunning = false;
-                        _phase = "Failed";
+                        _phase = ExecutionPhase.Failed;
                     }
                 }
                 finally
@@ -368,7 +379,7 @@ public class PlanExecutor
         {
             _totalBytes = moveItems.Sum(m => m.SizeOnDisk);
             _totalFiles = moveItems.Count;
-            _phase = "Transferring";
+            _phase = ExecutionPhase.Transferring;
 
             var volumeSummaries = plan.Volumes.ToDictionary(v => v.Alias, StringComparer.OrdinalIgnoreCase);
 
@@ -469,7 +480,7 @@ public class PlanExecutor
         // a folder during the file copy process (which may take hours), we avoid re-creating it later.
         if (folderCleanup != null)
         {
-            foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned" || a.Status == "PreservedUnique"))
+            foreach (var action in folderCleanup.Actions.Where(a => a.Status == FolderCleanupStatus.Cleaning || a.Status == FolderCleanupStatus.Preserving))
             {
                 ct.ThrowIfCancellationRequested();
 
@@ -511,17 +522,17 @@ public class PlanExecutor
 
         lock (_stateLock)
         {
-            _phase = "Cleaning Folders";
+            _phase = ExecutionPhase.CleaningFolders;
             _activeTransfers.Clear();
             foreach (var v in _volumeStates.Values)
             {
-                v.SetActivity("Cleaning empty folders", "Cleaning Folders");
+                v.SetActivity("Cleaning empty folders", VolumeActivityStatus.CleaningFolders);
             }
         }
 
         if (folderCleanup != null)
         {
-            foreach (var action in folderCleanup.Actions.Where(a => a.Status == "Cleaned"))
+            foreach (var action in folderCleanup.Actions.Where(a => a.Status == FolderCleanupStatus.Cleaning))
             {
                 ct.ThrowIfCancellationRequested();
 
@@ -550,12 +561,12 @@ public class PlanExecutor
             _folderCleanup = folderCleanup != null ? folderCleanup with { Actions = ImmutableList<FolderCleanupAction>.Empty } : null;
             _completedAt = DateTime.UtcNow;
             _isRunning = false;
-            _phase = "Completed";
+            _phase = ExecutionPhase.Completed;
             _activeTransfers.Clear();
 
             foreach (var v in _volumeStates.Values)
             {
-                v.SetActivity("Complete", "Complete");
+                v.SetActivity("Complete", VolumeActivityStatus.Complete);
             }
         }
     }
@@ -664,9 +675,9 @@ public class PlanExecutor
                     ct.ThrowIfCancellationRequested();
 
                     if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var sVol))
-                        sVol.SetActivity($"Reading: \"{currentTask.FileName}\"", "Reading");
+                        sVol.SetActivity($"Reading: \"{currentTask.FileName}\"", VolumeActivityStatus.Reading);
                     if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tVol))
-                        tVol.SetActivity($"Writing: \"{currentTask.FileName}\"", "Writing");
+                        tVol.SetActivity($"Writing: \"{currentTask.FileName}\"", VolumeActivityStatus.Writing);
 
                     _activeTransfers[workerId] = new ActiveTransferInfo(
                         workerId,
@@ -745,9 +756,9 @@ public class PlanExecutor
         foreach (var (volName, vs) in _volumeStates)
         {
             bool isStillActive = _activeTransfers.Values.Any(t => t.SourceVolume == volName || t.TargetVolume == volName);
-            if (!isStillActive && (vs.Status == "Reading" || vs.Status == "Writing"))
+            if (!isStillActive && (vs.Status == VolumeActivityStatus.Reading || vs.Status == VolumeActivityStatus.Writing))
             {
-                vs.SetActivity("Idle", "Idle");
+                vs.SetActivity("Idle", VolumeActivityStatus.Idle);
             }
         }
     }
@@ -852,7 +863,7 @@ public class PlanExecutor
         public long MovedInBytes { get; private set; }
         public long MovedInFiles { get; private set; }
 
-        public string Status { get; private set; } = "Idle";
+        public VolumeActivityStatus Status { get; private set; } = VolumeActivityStatus.Idle;
         public string CurrentActivity { get; private set; } = "Idle";
 
         private readonly Dictionary<string, long> _outgoingRemaining;
@@ -895,7 +906,7 @@ public class PlanExecutor
             _incomingRemaining = new Dictionary<string, long>(incomingTotals, StringComparer.OrdinalIgnoreCase);
         }
 
-        public void SetActivity(string activity, string status)
+        public void SetActivity(string activity, VolumeActivityStatus status)
         {
             lock (_lock)
             {

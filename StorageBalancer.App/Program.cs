@@ -100,19 +100,18 @@ app.MapPost("/api/scan", (ScanStartRequest? request, ConfigManager configManager
     string snapshotPath;
     try
     {
-        var configuredFolder = config.SnapshotsFolder.Trim();
-        var snapshotFolder = Path.IsPathRooted(configuredFolder)
-            ? configuredFolder
-            : Path.Combine(environment.ContentRootPath, configuredFolder);
-        snapshotPath = Path.Combine(Path.GetFullPath(snapshotFolder), $"{snapshotName}.json");
+        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+        var baseName = GetSnapshotBaseName(snapshotName);
+
+        if (ResolveSnapshotFilePath(snapshotFolder, baseName) != null)
+            return Results.Conflict(new { Error = $"A snapshot named '{snapshotName}' already exists." });
+
+        snapshotPath = Path.Combine(snapshotFolder, $"{baseName}.snapshot");
     }
     catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
     {
         return Results.BadRequest(new { Error = "The configured snapshots folder is not a valid path." });
     }
-
-    if (File.Exists(snapshotPath))
-        return Results.Conflict(new { Error = $"A snapshot named '{snapshotName}' already exists." });
 
     if (!scanner.TryStartScan(config, snapshotName, snapshotPath))
         return Results.Conflict(new { Error = "A scan is already running." });
@@ -149,13 +148,36 @@ app.MapGet("/api/snapshots", (ConfigManager configManager, IWebHostEnvironment e
     if (!Directory.Exists(snapshotsFolder))
         return Results.Ok(Array.Empty<SnapshotListEntry>());
 
-    var snapshots = Directory.EnumerateFiles(snapshotsFolder, "*.json", SearchOption.TopDirectoryOnly)
-        .Select(path => new SnapshotListEntry(
-            Path.GetFileNameWithoutExtension(path),
-            File.GetLastWriteTimeUtc(path),
-            new FileInfo(path).Length))
+    var snapshots = Directory.EnumerateFiles(snapshotsFolder, "*", SearchOption.TopDirectoryOnly)
+        .Where(path =>
+            path.EndsWith(".snapshot.gz", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".snapshot", StringComparison.OrdinalIgnoreCase))
+        .Select(path =>
+        {
+            var fileName = Path.GetFileName(path);
+            var baseName = GetSnapshotBaseName(fileName);
+            var fi = new FileInfo(path);
+            return new
+            {
+                Path = path,
+                BaseName = baseName,
+                LastModifiedUtc = fi.LastWriteTimeUtc,
+                Length = fi.Length
+            };
+        })
+        .GroupBy(x => x.BaseName, StringComparer.OrdinalIgnoreCase)
+        .Select(g =>
+        {
+            var preferred = g
+                .OrderByDescending(x => x.Path.EndsWith(".snapshot", StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(x => x.Path.EndsWith(".snapshot.gz", StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(x => x.LastModifiedUtc)
+                .First();
+            return new SnapshotListEntry(preferred.BaseName, preferred.LastModifiedUtc, preferred.Length);
+        })
         .OrderByDescending(snapshot => snapshot.LastModifiedUtc)
         .ToArray();
+
     return Results.Ok(snapshots);
 });
 
@@ -181,7 +203,11 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
 
     try
     {
-        var snapshotPath = Path.Combine(ResolveSnapshotsFolder(config, environment), $"{snapshotName}.json");
+        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+        var snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
+        if (snapshotPath is null)
+            return Results.NotFound(new { Error = "The selected snapshot was not found." });
+
         var snapshot = repository.LoadSnapshot(snapshotPath);
         if (snapshot is null)
             return Results.NotFound(new { Error = "The selected snapshot was not found." });
@@ -209,7 +235,7 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
     }
     catch (InvalidDataException exception)
     {
-        return Results.BadRequest(new { Error = exception.Message });
+        return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {exception.Message}" });
     }
     catch (JsonException)
     {
@@ -231,24 +257,42 @@ app.MapPost("/api/execution/start", (ExecutionStartRequest? request, ConfigManag
     if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
         return Results.BadRequest(new { Error = "Configure a snapshots folder before executing." });
 
-    string snapshotPath;
+    string? snapshotPath;
     try
     {
-        snapshotPath = Path.Combine(ResolveSnapshotsFolder(config, environment), $"{snapshotName}.json");
+        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+        snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
+        if (snapshotPath is null)
+            return Results.NotFound(new { Error = "The selected snapshot was not found." });
     }
     catch (Exception ex)
     {
         return Results.BadRequest(new { Error = $"Invalid snapshot path: {ex.Message}" });
     }
 
-    var snapshot = repository.LoadSnapshot(snapshotPath);
-    if (snapshot is null)
-        return Results.NotFound(new { Error = "The selected snapshot was not found." });
+    try
+    {
+        var snapshot = repository.LoadSnapshot(snapshotPath);
+        if (snapshot is null)
+            return Results.NotFound(new { Error = "The selected snapshot was not found." });
 
-    if (!executor.TryStartExecution(config, snapshot, request))
-        return Results.Conflict(new { Error = "An execution or simulation is already running." });
+        if (!executor.TryStartExecution(config, snapshot, request))
+            return Results.Conflict(new { Error = "An execution or simulation is already running." });
 
-    return Results.Accepted("/api/execution/status", executor.GetStatus());
+        return Results.Accepted("/api/execution/status", executor.GetStatus());
+    }
+    catch (InvalidDataException ex)
+    {
+        return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {ex.Message}" });
+    }
+    catch (JsonException)
+    {
+        return Results.BadRequest(new { Error = "The selected file is not a valid snapshot." });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {ex.Message}" });
+    }
 });
 
 app.MapGet("/api/execution/status", (PlanExecutor executor) => executor.GetStatus());
@@ -280,6 +324,49 @@ static string ResolveSnapshotsFolder(AppConfig config, IWebHostEnvironment envir
         ? configuredFolder
         : Path.Combine(environment.ContentRootPath, configuredFolder);
     return Path.GetFullPath(snapshotsFolder);
+}
+
+static string GetSnapshotBaseName(string fileName)
+{
+    var name = Path.GetFileName(fileName);
+    if (name.EndsWith(".snapshot.gz", StringComparison.OrdinalIgnoreCase))
+        return name[..^".snapshot.gz".Length];
+    if (name.EndsWith(".snapshot", StringComparison.OrdinalIgnoreCase))
+        return name[..^".snapshot".Length];
+    return Path.GetFileNameWithoutExtension(name);
+}
+
+static string? ResolveSnapshotFilePath(string snapshotsFolder, string snapshotName)
+{
+    if (string.IsNullOrWhiteSpace(snapshotName) || !Directory.Exists(snapshotsFolder))
+        return null;
+
+    var trimmed = snapshotName.Trim();
+
+    // 1. Direct file match if full filename was provided
+    var directPath = Path.Combine(snapshotsFolder, trimmed);
+    if (File.Exists(directPath))
+        return directPath;
+
+    // 2. Candidate extensions in priority order (.snapshot -> .snapshot.gz)
+    string[] candidateExtensions = [".snapshot", ".snapshot.gz"];
+    foreach (var ext in candidateExtensions)
+    {
+        var candidate = Path.Combine(snapshotsFolder, $"{trimmed}{ext}");
+        if (File.Exists(candidate))
+            return candidate;
+    }
+
+    // 3. Fallback: normalize base name if user provided an extension and try candidates
+    var baseName = GetSnapshotBaseName(trimmed);
+    foreach (var ext in candidateExtensions)
+    {
+        var candidate = Path.Combine(snapshotsFolder, $"{baseName}{ext}");
+        if (File.Exists(candidate))
+            return candidate;
+    }
+
+    return null;
 }
 
 app.Run(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:5000");
