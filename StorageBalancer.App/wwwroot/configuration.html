@@ -697,7 +697,9 @@
                     filePlacementRules: rules,
                     duplicates: state.config.duplicates,
                     filler: state.config.filler,
-                    unmatched: state.config.unmatched
+                    unmatched: state.config.unmatched,
+                    maxExecutionThreads: state.config.maxExecutionThreads || 2,
+                    verifyCopies: state.config.verifyCopies !== false
                 };
 
                 const res = await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });

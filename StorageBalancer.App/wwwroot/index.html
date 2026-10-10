@@ -54,6 +54,10 @@
                 <p>Run automated end-to-end pool balancing: Scan volumes, plan placements, and execute the balancing plan.</p>
             </div>
             <div class="hero-actions">
+                <div style="display:flex; align-items:center; gap:6px;">
+                    <label for="test-max-files" style="font-size:12px; font-weight:600; color:var(--ink); white-space:nowrap;" title="Temporary test limit: throw an exception after copying this number of files">Number of files to copy:</label>
+                    <input type="number" id="test-max-files" min="1" placeholder="All" style="width:70px; padding:6px 8px; border:1px solid var(--line); border-radius:5px; background:var(--surface); font-size:13px;" title="Test option: limits how many files are copied before throwing an exception">
+                </div>
                 <a href="/configuration.html" class="btn" title="Open and edit pool volumes, paths, and placement rules">
                     ⚙️ Edit Configuration
                 </a>
@@ -245,6 +249,8 @@
             btnStart.style.display = 'none';
             btnCancel.style.display = 'inline-flex';
             btnCancel.disabled = false;
+            const maxFilesInput = document.getElementById('test-max-files');
+            if (maxFilesInput) maxFilesInput.disabled = true;
 
             // Full end-to-end run: Live Scan first
             const now = new Date();
@@ -370,10 +376,14 @@
             if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
 
             return new Promise(async (resolve, reject) => {
+                const maxFilesVal = document.getElementById('test-max-files')?.value;
+                const maxFilesToCopy = maxFilesVal ? parseInt(maxFilesVal, 10) : null;
+
                 try {
                     await Balancer.execution.start({
                         snapshotName,
-                        isSimulation: false
+                        isSimulation: false,
+                        maxFilesToCopy
                     });
                 } catch (startErr) {
                     return reject(startErr);
@@ -442,6 +452,8 @@
             btnCancel.style.display = 'none';
             btnCancel.disabled = false;
             btnCancel.textContent = 'Cancel Process';
+            const maxFilesInput = document.getElementById('test-max-files');
+            if (maxFilesInput) maxFilesInput.disabled = false;
         }
 
         btnStart.addEventListener('click', startProcess);

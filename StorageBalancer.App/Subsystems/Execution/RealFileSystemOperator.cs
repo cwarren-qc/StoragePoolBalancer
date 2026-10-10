@@ -12,6 +12,7 @@ public class RealFileSystemOperator : IFileSystemOperator
 {
     public static readonly DateTime OrphanMarkerTimestampUtc = new DateTime(2006, 7, 8, 9, 10, 11, DateTimeKind.Utc);
     public const string TempFileExtension = ".spb-tmp";
+    public const string BackupFileExtension = ".spb-old";
     private const int BufferSize = 1024 * 1024; // 1 MiB stream buffer
 
     private readonly bool _verifyCopies;
@@ -47,139 +48,174 @@ public class RealFileSystemOperator : IFileSystemOperator
         }
 
         string tempFilePath = task.TargetFilePath + TempFileExtension;
+        string sourceOldFilePath = task.SourceFilePath + BackupFileExtension;
 
-        // Clean up any stale temp file with this name before starting
+        // Clean up any stale temp or old backup files before starting
         if (File.Exists(tempFilePath))
         {
-            try { File.Delete(tempFilePath); } catch { /* Ignore cleanup of old temp file */ }
+            try { File.Delete(tempFilePath); } catch { /* Ignore cleanup of stale temp file */ }
+        }
+        if (File.Exists(sourceOldFilePath))
+        {
+            try { File.Delete(sourceOldFilePath); } catch { /* Ignore cleanup of stale backup file */ }
         }
 
         byte[] buffer = new byte[BufferSize];
         byte[]? sourceHash = null;
+        bool sourceRenamedToOld = false;
 
         try
         {
-            // 1. Copy streaming with on-the-fly checksumming
-            using (var sourceHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+            // Open source with FileShare.Read | FileShare.Delete:
+            // - FileShare.Read: Hard lock against writers. Any process attempting to write/modify is blocked,
+            //   and if another process currently holds write access, this Open fails immediately.
+            // - FileShare.Delete: Allows our process to rename the open source file to ".spb-old" while holding the lock.
+            var sourceOptions = new FileStreamOptions
             {
-                var sourceOptions = new FileStreamOptions
+                Mode = FileMode.Open,
+                Access = FileAccess.Read,
+                Share = FileShare.Read | FileShare.Delete,
+                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                BufferSize = BufferSize
+            };
+
+            var targetOptions = new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew,
+                Access = FileAccess.ReadWrite,
+                Share = FileShare.ReadWrite,
+                Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
+                BufferSize = BufferSize
+            };
+
+            await using (var sourceStream = new FileStream(task.SourceFilePath, sourceOptions))
+            {
+                // 1. Copy streaming to temporary file with on-the-fly checksumming while source is locked
+                using (var sourceHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
                 {
-                    Mode = FileMode.Open,
-                    Access = FileAccess.Read,
-                    Share = FileShare.Read,
-                    Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                    BufferSize = BufferSize
-                };
-
-                var targetOptions = new FileStreamOptions
-                {
-                    Mode = FileMode.CreateNew,
-                    Access = FileAccess.ReadWrite,
-                    Share = FileShare.ReadWrite,
-                    Options = FileOptions.Asynchronous | FileOptions.WriteThrough,
-                    BufferSize = BufferSize
-                };
-
-                await using (var sourceStream = new FileStream(task.SourceFilePath, sourceOptions))
-                await using (var targetStream = new FileStream(tempFilePath, targetOptions))
-                {
-                    // Tag with custom orphan marker timestamp so it can be identified if interrupted
-                    try
+                    await using (var targetStream = new FileStream(tempFilePath, targetOptions))
                     {
-                        File.SetCreationTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
-                        File.SetLastWriteTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
-                    }
-                    catch
-                    {
-                        // Timestamp tagging is best-effort while handle is open
+                        // Tag with custom orphan marker timestamp so it can be identified if interrupted
+                        try
+                        {
+                            File.SetCreationTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
+                            File.SetLastWriteTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
+                        }
+                        catch
+                        {
+                            // Timestamp tagging is best-effort while handle is open
+                        }
+
+                        int bytesRead;
+                        while ((bytesRead = await sourceStream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                        {
+                            sourceHasher.AppendData(buffer, 0, bytesRead);
+                            await targetStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
+                            onBytesTransferred(bytesRead);
+                        }
+
+                        await targetStream.FlushAsync(ct).ConfigureAwait(false);
                     }
 
-                    int bytesRead;
-                    while ((bytesRead = await sourceStream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
-                    {
-                        sourceHasher.AppendData(buffer, 0, bytesRead);
-                        await targetStream.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
-                        onBytesTransferred(bytesRead);
-                    }
-
-                    await targetStream.FlushAsync(ct).ConfigureAwait(false);
+                    sourceHash = sourceHasher.GetHashAndReset();
                 }
 
-                sourceHash = sourceHasher.GetHashAndReset();
-            }
-
-            // Ensure orphan marker timestamp is set on closed temp file
-            try
-            {
-                File.SetCreationTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
-                File.SetLastWriteTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
-            }
-            catch
-            {
-                // Best-effort
-            }
-
-            // 2. Size verification
-            var tempInfo = new FileInfo(tempFilePath);
-            if (!tempInfo.Exists)
-                throw new FileNotFoundException($"Written temporary file was not found: '{tempFilePath}'");
-
-            if (tempInfo.Length != sourceInfo.Length)
-                throw new IOException($"Target file size mismatch for '{task.FileName}': expected {sourceInfo.Length} bytes, but wrote {tempInfo.Length} bytes.");
-
-            // 3. Verification pass: Read back non-cached stream and verify checksum
-            if (_verifyCopies && sourceHash != null)
-            {
-                using var targetHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-                var verifyOptions = new FileStreamOptions
+                // Ensure orphan marker timestamp is set on closed temp file
+                try
                 {
-                    Mode = FileMode.Open,
-                    Access = FileAccess.Read,
-                    Share = FileShare.Read,
-                    Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                    BufferSize = BufferSize
-                };
-
-                await using (var verifyStream = new FileStream(tempFilePath, verifyOptions))
+                    File.SetCreationTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
+                    File.SetLastWriteTimeUtc(tempFilePath, OrphanMarkerTimestampUtc);
+                }
+                catch
                 {
-                    int bytesRead;
-                    while ((bytesRead = await verifyStream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                    // Best-effort
+                }
+
+                // 2. Size verification while source lock is still held
+                var tempInfo = new FileInfo(tempFilePath);
+                if (!tempInfo.Exists)
+                    throw new FileNotFoundException($"Written temporary file was not found: '{tempFilePath}'");
+
+                if (tempInfo.Length != sourceInfo.Length)
+                    throw new IOException($"Target file size mismatch for '{task.FileName}': expected {sourceInfo.Length} bytes, but wrote {tempInfo.Length} bytes.");
+
+                // 3. Verification pass: Read back non-cached stream and verify checksum
+                if (_verifyCopies && sourceHash != null)
+                {
+                    using var targetHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                    var verifyOptions = new FileStreamOptions
                     {
-                        targetHasher.AppendData(buffer, 0, bytesRead);
+                        Mode = FileMode.Open,
+                        Access = FileAccess.Read,
+                        Share = FileShare.Read,
+                        Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                        BufferSize = BufferSize
+                    };
+
+                    await using (var verifyStream = new FileStream(tempFilePath, verifyOptions))
+                    {
+                        int bytesRead;
+                        while ((bytesRead = await verifyStream.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                        {
+                            targetHasher.AppendData(buffer, 0, bytesRead);
+                        }
+                    }
+
+                    byte[] targetHash = targetHasher.GetHashAndReset();
+                    if (!CryptographicOperations.FixedTimeEquals(sourceHash, targetHash))
+                    {
+                        throw new InvalidDataException(
+                            $"Checksum verification failed for '{task.FileName}'. Destination checksum does not match source checksum."
+                        );
                     }
                 }
 
-                byte[] targetHash = targetHasher.GetHashAndReset();
-                if (!CryptographicOperations.FixedTimeEquals(sourceHash, targetHash))
+                // 4. Preserve original metadata
+                try
                 {
-                    throw new InvalidDataException(
-                        $"Checksum verification failed for '{task.FileName}'. Destination checksum does not match source checksum."
-                    );
+                    File.SetCreationTimeUtc(tempFilePath, sourceInfo.CreationTimeUtc);
+                    File.SetLastWriteTimeUtc(tempFilePath, sourceInfo.LastWriteTimeUtc);
+                    File.SetLastAccessTimeUtc(tempFilePath, sourceInfo.LastAccessTimeUtc);
+                    File.SetAttributes(tempFilePath, sourceInfo.Attributes);
                 }
+                catch
+                {
+                    // Attribute setting best effort
+                }
+
+                // 5. Rename source file to .spb-old WHILE STILL HOLDING THE SOURCE LOCK
+                File.Move(task.SourceFilePath, sourceOldFilePath);
+                sourceRenamedToOld = true;
+
+                // 6. Rename copied file from .spb-tmp to final destination file path
+                File.Move(tempFilePath, task.TargetFilePath);
+
+                // Source lock handle will now automatically close when exiting this block
             }
 
-            // 4. Preserve original metadata
-            try
-            {
-                File.SetCreationTimeUtc(tempFilePath, sourceInfo.CreationTimeUtc);
-                File.SetLastWriteTimeUtc(tempFilePath, sourceInfo.LastWriteTimeUtc);
-                File.SetLastAccessTimeUtc(tempFilePath, sourceInfo.LastAccessTimeUtc);
-                File.SetAttributes(tempFilePath, sourceInfo.Attributes);
-            }
-            catch
-            {
-                // Attribute setting best effort
-            }
-
-            // 5. Atomic commit: Move temp file to final target path
-            File.Move(tempFilePath, task.TargetFilePath);
-
-            // 6. Delete original source file only after successful atomic commit
-            File.Delete(task.SourceFilePath);
+            // 7. Delete the old source file (.spb-old) now that destination is active and source lock is released
+            File.Delete(sourceOldFilePath);
         }
         catch
         {
-            // Rollback: Safely delete partial/failed temporary file on target volume
+            // Rollback:
+            // A. If source file was already renamed to .spb-old, attempt to rename it back to its original name
+            if (sourceRenamedToOld)
+            {
+                try
+                {
+                    if (File.Exists(sourceOldFilePath) && !File.Exists(task.SourceFilePath))
+                    {
+                        File.Move(sourceOldFilePath, task.SourceFilePath);
+                    }
+                }
+                catch
+                {
+                    // Best-effort rollback
+                }
+            }
+
+            // B. Safely delete partial/failed temporary file on target volume
             try
             {
                 if (File.Exists(tempFilePath))

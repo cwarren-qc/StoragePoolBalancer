@@ -41,12 +41,6 @@ public sealed class PlacementPlanner
 
         foreach (var volume in snapshot.Volumes)
         {
-            if (!volume.IsComplete)
-            {
-                warnings.Add(new PlanningWarning($"Excluded incomplete volume {volume.Alias}."));
-                continue;
-            }
-
             if (string.IsNullOrWhiteSpace(volume.RootFolderPath) || volume.Folders is null || volume.Folders.Count == 0)
             {
                 warnings.Add(new PlanningWarning($"Excluded volume {volume.Alias}: its scan has no root folder data."));
@@ -194,8 +188,8 @@ public sealed class PlacementPlanner
                     {
                         var target = m.Targets.Keys.First();
                         var biggestSource = m.Sources.OrderByDescending(kv => kv.Value).FirstOrDefault().Key;
-                        logic = string.Equals(target, biggestSource, StringComparison.OrdinalIgnoreCase) 
-                            ? PlacementLogic.Consolidating 
+                        logic = string.Equals(target, biggestSource, StringComparison.OrdinalIgnoreCase)
+                            ? PlacementLogic.Consolidating
                             : PlacementLogic.MovingConsolidating;
                     }
                 }

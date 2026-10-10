@@ -3,6 +3,7 @@
 [Oo]bj/
 artifacts/
 TestResults/
+publish/
 
 # IDE files
 .vs/

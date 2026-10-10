@@ -37,6 +37,9 @@ public class PlanExecutor
 
     private readonly ConcurrentDictionary<string, VolumeState> _volumeStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<int, ActiveTransferInfo> _activeTransfers = new();
+    private int? _maxFilesToCopy;
+    private long _lastDiagnosticLogTicks;
+    private readonly List<TransferErrorItem> _transferErrors = new();
 
     public PlanExecutor(PlacementPlanner planner, JsonStateRepository stateRepository)
     {
@@ -83,7 +86,8 @@ public class PlanExecutor
                 volumes,
                 activeTransfers,
                 _phase,
-                _folderCleanup
+                _folderCleanup,
+                _transferErrors.ToImmutableList()
             );
         }
     }
@@ -152,8 +156,10 @@ public class PlanExecutor
 
             _transferredBytes = 0;
             _transferredFiles = 0;
+            _maxFilesToCopy = request.MaxFilesToCopy;
             _volumeStates.Clear();
             _activeTransfers.Clear();
+            _transferErrors.Clear();
 
             int maxThreads = request.MaxThreads.GetValueOrDefault(config.MaxExecutionThreads);
             if (maxThreads < 1) maxThreads = 1;
@@ -343,7 +349,7 @@ public class PlanExecutor
                     string srcRoot = volumeRootMap.GetValueOrDefault(f.OriginalVolumeAlias, "");
                     string tgtRoot = volumeRootMap.GetValueOrDefault(f.DestinationVolumeAlias, "");
                     string cleanRelativePath = f.RelativePath.TrimStart('\\', '/');
-                    string srcPath = !string.IsNullOrEmpty(f.OriginalFullPath) && File.Exists(f.OriginalFullPath)
+                    string srcPath = !string.IsNullOrEmpty(f.OriginalFullPath)
                         ? f.OriginalFullPath
                         : (!string.IsNullOrEmpty(srcRoot) ? Path.Combine(srcRoot, cleanRelativePath) : "");
                     string tgtPath = !string.IsNullOrEmpty(tgtRoot) ? Path.Combine(tgtRoot, cleanRelativePath) : "";
@@ -419,7 +425,7 @@ public class PlanExecutor
                 long initialTotalMovedInBytes = moveItems.Where(m => string.Equals(m.TargetVolume, vol.Alias, StringComparison.OrdinalIgnoreCase)).Sum(m => m.SizeOnDisk);
                 long initialTotalMovedInFiles = moveItems.Count(m => string.Equals(m.TargetVolume, vol.Alias, StringComparison.OrdinalIgnoreCase));
 
-                long initialCurrentSize = otherItems + selfStayed + initialTotalMovedOutBytes;
+                long initialCurrentSize = selfStayed + initialTotalMovedOutBytes;
 
                 var state = new VolumeState(
                     vol.Alias,
@@ -571,9 +577,11 @@ public class PlanExecutor
         object queueLock,
         CancellationToken ct)
     {
-        while (true)
+        try
         {
-            ct.ThrowIfCancellationRequested();
+            while (true)
+            {
+                ct.ThrowIfCancellationRequested();
 
             PairQueue? activeQueue = null;
             IDisposable? lockReleaser = null;
@@ -581,6 +589,11 @@ public class PlanExecutor
 
             lock (queueLock)
             {
+                if (_maxFilesToCopy.HasValue && _transferredFiles >= _maxFilesToCopy.Value)
+                {
+                    return;
+                }
+
                 // Check if all work across all queues is done
                 if (pairQueues.All(pq => pq.Tasks.Count == 0))
                 {
@@ -653,6 +666,13 @@ public class PlanExecutor
 
             if (currentTask == null)
             {
+                long now = Environment.TickCount64;
+                if (now - Interlocked.Read(ref _lastDiagnosticLogTicks) > 3000)
+                {
+                    Interlocked.Exchange(ref _lastDiagnosticLogTicks, now);
+                    LogQueueBlockedDiagnostics(workerId, pairQueues, lockManager);
+                }
+
                 // Disks currently locked by other workers or waiting on headroom space; wait briefly and retry
                 await Task.Delay(25, ct).ConfigureAwait(false);
                 continue;
@@ -671,6 +691,8 @@ public class PlanExecutor
                     if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tVol))
                         tVol.SetActivity($"Writing: \"{currentTask.FileName}\"", VolumeActivityStatus.Writing);
 
+                    Console.WriteLine($"COPYING: {currentTask.SourceVolume} to {currentTask.TargetVolume}, {currentTask.RelativePath} ({FormatBytes(currentTask.SizeOnDisk)})");
+
                     _activeTransfers[workerId] = new ActiveTransferInfo(
                         workerId,
                         currentTask.FileName,
@@ -686,39 +708,93 @@ public class PlanExecutor
                     long taskBytesTransferred = 0;
                     var sw = Stopwatch.StartNew();
 
-                    await fsOperator.TransferFileAsync(currentTask, bytesTransferred =>
+                    bool copySucceeded = false;
+                    try
                     {
-                        long delta = bytesTransferred - taskBytesTransferred;
-                        if (delta > 0)
+                        await fsOperator.TransferFileAsync(currentTask, chunkBytes =>
                         {
-                            taskBytesTransferred = bytesTransferred;
-                            Interlocked.Add(ref _transferredBytes, delta);
-                        }
+                            if (chunkBytes > 0)
+                            {
+                                taskBytesTransferred += chunkBytes;
+                                Interlocked.Add(ref _transferredBytes, chunkBytes);
+                            }
 
-                        double bps = sw.Elapsed.TotalSeconds > 0 ? (double)taskBytesTransferred / sw.Elapsed.TotalSeconds : 0;
-                        _activeTransfers[workerId] = new ActiveTransferInfo(
-                            workerId,
-                            currentTask.FileName,
+                            double bps = sw.Elapsed.TotalSeconds > 0 ? (double)taskBytesTransferred / sw.Elapsed.TotalSeconds : 0;
+                            _activeTransfers[workerId] = new ActiveTransferInfo(
+                                workerId,
+                                currentTask.FileName,
+                                currentTask.SourceVolume,
+                                currentTask.TargetVolume,
+                                currentTask.SourceDisk,
+                                currentTask.TargetDisk,
+                                currentTask.SizeOnDisk,
+                                taskBytesTransferred,
+                                bps
+                            );
+                        }, ct).ConfigureAwait(false);
+
+                        Console.WriteLine($"COPIED: {currentTask.SourceVolume} to {currentTask.TargetVolume}, {currentTask.FileName} ({FormatBytes(currentTask.SizeOnDisk)}) in {sw.Elapsed.TotalSeconds:F1}s");
+                        copySucceeded = true;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"\n[Thread {workerId}] FAILED COPYING: {currentTask.SourceVolume} to {currentTask.TargetVolume}, {currentTask.RelativePath}\n  -> Reason: {ex.GetType().Name} - {ex.Message}\n");
+
+                        var errorItem = new TransferErrorItem(
                             currentTask.SourceVolume,
                             currentTask.TargetVolume,
-                            currentTask.SourceDisk,
-                            currentTask.TargetDisk,
+                            currentTask.RelativePath,
+                            currentTask.FileName,
                             currentTask.SizeOnDisk,
-                            taskBytesTransferred,
-                            bps
+                            $"{ex.GetType().Name}: {ex.Message}",
+                            DateTime.UtcNow
                         );
-                    }, ct).ConfigureAwait(false);
 
-                    // Successfully completed this file
-                    Interlocked.Increment(ref _transferredFiles);
-                    if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var srcState))
-                        srcState.CompleteMovedOut(currentTask.TargetVolume, currentTask.SizeOnDisk);
-                    if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tgtState))
-                        tgtState.CompleteMovedIn(currentTask.SourceVolume, currentTask.SizeOnDisk);
+                        lock (_stateLock)
+                        {
+                            _transferErrors.Add(errorItem);
+                            if (taskBytesTransferred > 0)
+                            {
+                                Interlocked.Add(ref _transferredBytes, -taskBytesTransferred);
+                            }
+                            Interlocked.Add(ref _totalBytes, -currentTask.SizeOnDisk);
+                            Interlocked.Decrement(ref _totalFiles);
+                        }
+
+                        if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var srcFailState))
+                            srcFailState.RecordFailedMovedOut(currentTask.TargetVolume, currentTask.SizeOnDisk);
+                        if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tgtFailState))
+                            tgtFailState.RecordFailedMovedIn(currentTask.SourceVolume, currentTask.SizeOnDisk);
+                    }
+
+                    if (copySucceeded)
+                    {
+                        // Successfully completed this file
+                        long completedCount = Interlocked.Increment(ref _transferredFiles);
+                        if (_volumeStates.TryGetValue(currentTask.SourceVolume, out var srcState))
+                            srcState.CompleteMovedOut(currentTask.TargetVolume, currentTask.SizeOnDisk);
+                        if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tgtState))
+                            tgtState.CompleteMovedIn(currentTask.SourceVolume, currentTask.SizeOnDisk);
+
+                        if (_maxFilesToCopy.HasValue && completedCount >= _maxFilesToCopy.Value)
+                        {
+                            throw new InvalidOperationException($"Test limit reached: {completedCount} file(s) copied (limit was {_maxFilesToCopy.Value}). Execution aborted for test.");
+                        }
+                    }
 
                     // Check if another task can immediately be processed on this same spindle pair
                     lock (queueLock)
                     {
+                        if (_maxFilesToCopy.HasValue && _transferredFiles >= _maxFilesToCopy.Value)
+                        {
+                            currentTask = null;
+                            break;
+                        }
+
                         var nextNode = FindCandidate(activeQueue!, respectHeadroomReserve: true)
                                     ?? FindCandidate(activeQueue!, respectHeadroomReserve: false);
 
@@ -742,6 +818,16 @@ public class PlanExecutor
             }
         }
     }
+    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Worker cancelled
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"\n[Thread {workerId}] WORKER TERMINATED UNEXPECTEDLY: {ex.GetType().Name} - {ex.Message}\n");
+            throw;
+        }
+    }
 
     private void ResetVolumeActivityIfIdle()
     {
@@ -753,6 +839,79 @@ public class PlanExecutor
                 vs.SetActivity("Idle", VolumeActivityStatus.Idle);
             }
         }
+    }
+
+    private void LogQueueBlockedDiagnostics(int workerId, List<PairQueue> pairQueues, PhysicalDiskLockManager lockManager)
+    {
+        var activeQueues = pairQueues.Where(pq => pq.Tasks.Count > 0).ToList();
+        if (activeQueues.Count == 0) return;
+
+        var lockedDisks = activeQueues
+            .SelectMany(pq => new[] { pq.SourceDisk, pq.TargetDisk })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Where(lockManager.IsLocked)
+            .ToList();
+
+        Console.WriteLine($"\n[Worker {workerId}] WAITING - All remaining tasks blocked. Active queues: {activeQueues.Count}");
+        if (lockedDisks.Count > 0)
+        {
+            Console.WriteLine($"  [Physical Spindle Locks]: Currently busy disks: {string.Join(", ", lockedDisks)}");
+        }
+        else
+        {
+            Console.WriteLine("  [Physical Spindle Locks]: No physical disks are currently locked.");
+        }
+
+        foreach (var pq in activeQueues.Take(15))
+        {
+            bool srcLocked = lockManager.IsLocked(pq.SourceDisk);
+            bool tgtLocked = lockManager.IsLocked(pq.TargetDisk);
+
+            var firstTask = pq.Tasks.First?.Value;
+            if (firstTask == null) continue;
+
+            _volumeStates.TryGetValue(firstTask.TargetVolume, out var tgtState);
+            long tgtFree = tgtState != null ? Math.Max(0, tgtState.Capacity - tgtState.CurrentSize) : 0;
+            long tgtCap = tgtState?.Capacity ?? 0;
+            long tgtCur = tgtState?.CurrentSize ?? 0;
+            long reserve = tgtState != null ? Math.Min(20L * 1024 * 1024 * 1024, tgtState.Capacity / 20) : 0;
+            long tgtPendingOut = tgtState != null ? Math.Max(0, tgtState.MovedOutTotalBytes - tgtState.MovedOutBytes) : 0;
+
+            long minSize = pq.Tasks.Min(t => t.SizeOnDisk);
+            long maxSize = pq.Tasks.Max(t => t.SizeOnDisk);
+
+            var pass1 = FindCandidate(pq, respectHeadroomReserve: true);
+            var pass2 = FindCandidate(pq, respectHeadroomReserve: false);
+
+            string blockReason;
+            if (srcLocked || tgtLocked)
+            {
+                var busy = new List<string>();
+                if (srcLocked) busy.Add($"Source '{pq.SourceDisk}'");
+                if (tgtLocked) busy.Add($"Target '{pq.TargetDisk}'");
+                blockReason = $"SPINDLE BUSY: {string.Join(", ", busy)} locked by another worker.";
+            }
+            else if (pass1 == null && pass2 == null)
+            {
+                blockReason = $"INSUFFICIENT SPACE: Target '{firstTask.TargetVolume}' has {FormatBytes(tgtFree)} free (Cap: {FormatBytes(tgtCap)}, CurUsed: {FormatBytes(tgtCur)}), but smallest waiting file is {FormatBytes(minSize)}.";
+            }
+            else if (pass1 == null && pass2 != null)
+            {
+                blockReason = $"HEADROOM RESERVE: Target '{firstTask.TargetVolume}' has {FormatBytes(tgtFree)} free, needs {FormatBytes(reserve)} reserve (Pending out: {FormatBytes(tgtPendingOut)}). Fallback Pass 2 has candidate '{pass2.Value.FileName}' ({FormatBytes(pass2.Value.SizeOnDisk)}).";
+            }
+            else
+            {
+                blockReason = $"READY FOR PICKUP: Next candidate is '{pass1!.Value.FileName}' ({FormatBytes(pass1.Value.SizeOnDisk)}).";
+            }
+
+            Console.WriteLine($"  * Queue {pq.SourceDisk} -> {pq.TargetDisk} ({pq.Tasks.Count:N0} files, {FormatBytes(minSize)} to {FormatBytes(maxSize)}): {blockReason}");
+        }
+
+        if (activeQueues.Count > 15)
+        {
+            Console.WriteLine($"  * ... plus {activeQueues.Count - 15} more active queues.");
+        }
+        Console.WriteLine();
     }
 
     private LinkedListNode<FileMoveTask>? FindCandidate(PairQueue pq, bool respectHeadroomReserve)
@@ -845,10 +1004,10 @@ public class PlanExecutor
         public long StayedSize { get; private set; }
         public long OtherItemsSizeOnDisk { get; }
 
-        public long MovedOutTotalBytes { get; }
-        public long MovedOutTotalFiles { get; }
-        public long MovedInTotalBytes { get; }
-        public long MovedInTotalFiles { get; }
+        public long MovedOutTotalBytes { get; private set; }
+        public long MovedOutTotalFiles { get; private set; }
+        public long MovedInTotalBytes { get; private set; }
+        public long MovedInTotalFiles { get; private set; }
 
         public long MovedOutBytes { get; private set; }
         public long MovedOutFiles { get; private set; }
@@ -931,6 +1090,33 @@ public class PlanExecutor
                 CurrentSize += size;
                 StayedSize += size; // Absorbs into stayed data!
 
+                if (_incomingRemaining.TryGetValue(sourceVolume, out var rem))
+                {
+                    _incomingRemaining[sourceVolume] = Math.Max(0, rem - size);
+                }
+            }
+        }
+
+        public void RecordFailedMovedOut(string targetVolume, long size)
+        {
+            lock (_lock)
+            {
+                MovedOutTotalBytes = Math.Max(0, MovedOutTotalBytes - size);
+                MovedOutTotalFiles = Math.Max(0, MovedOutTotalFiles - 1);
+                StayedSize += size;
+                if (_outgoingRemaining.TryGetValue(targetVolume, out var rem))
+                {
+                    _outgoingRemaining[targetVolume] = Math.Max(0, rem - size);
+                }
+            }
+        }
+
+        public void RecordFailedMovedIn(string sourceVolume, long size)
+        {
+            lock (_lock)
+            {
+                MovedInTotalBytes = Math.Max(0, MovedInTotalBytes - size);
+                MovedInTotalFiles = Math.Max(0, MovedInTotalFiles - 1);
                 if (_incomingRemaining.TryGetValue(sourceVolume, out var rem))
                 {
                     _incomingRemaining[sourceVolume] = Math.Max(0, rem - size);

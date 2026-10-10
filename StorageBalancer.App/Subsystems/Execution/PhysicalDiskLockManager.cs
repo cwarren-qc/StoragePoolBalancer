@@ -12,6 +12,12 @@ public sealed class PhysicalDiskLockManager
     private SemaphoreSlim GetSemaphore(string diskName) =>
         _locks.GetOrAdd(string.IsNullOrWhiteSpace(diskName) ? "DefaultDisk" : diskName.Trim(), _ => new SemaphoreSlim(1, 1));
 
+    public bool IsLocked(string diskName)
+    {
+        var d = string.IsNullOrWhiteSpace(diskName) ? "DefaultDisk" : diskName.Trim();
+        return _locks.TryGetValue(d, out var sem) && sem.CurrentCount == 0;
+    }
+
     public bool TryAcquire(string sourceDisk, string targetDisk, out IDisposable? releaser)
     {
         var s = string.IsNullOrWhiteSpace(sourceDisk) ? "DefaultDisk" : sourceDisk.Trim();

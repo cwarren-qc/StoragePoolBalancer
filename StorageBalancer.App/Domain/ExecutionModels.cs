@@ -41,7 +41,8 @@ public record ExecutionStartRequest(
     bool IsSimulation = true,
     int SimulationDurationSeconds = 120,
     int? MaxThreads = null,
-    bool? VerifyCopies = null
+    bool? VerifyCopies = null,
+    int? MaxFilesToCopy = 10
 );
 
 public record TransferSegment(
@@ -122,6 +123,16 @@ public record FolderCleanupSummary(
     ImmutableList<FolderCleanupAction> Actions
 );
 
+public record TransferErrorItem(
+    string SourceVolume,
+    string TargetVolume,
+    string RelativePath,
+    string FileName,
+    long SizeOnDisk,
+    string ErrorMessage,
+    DateTime TimestampUtc
+);
+
 public record ExecutionStatus(
     bool IsRunning,
     bool IsSimulation,
@@ -139,6 +150,7 @@ public record ExecutionStatus(
     ImmutableList<VolumeExecutionProgress> Volumes,
     ImmutableList<ActiveTransferInfo> ActiveTransfers,
     ExecutionPhase Phase = ExecutionPhase.Idle,
-    FolderCleanupSummary? FolderCleanup = null
+    FolderCleanupSummary? FolderCleanup = null,
+    ImmutableList<TransferErrorItem>? TransferErrors = null
 );
 

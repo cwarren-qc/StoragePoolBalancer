@@ -188,7 +188,8 @@ window.Balancer.execution = {
                 isSimulation: options.isSimulation !== false,
                 simulationDurationSeconds: (options.simulationDurationSeconds !== undefined && options.simulationDurationSeconds !== null) ? options.simulationDurationSeconds : 120,
                 maxThreads: options.maxThreads || null,
-                verifyCopies: options.verifyCopies !== false
+                verifyCopies: options.verifyCopies !== false,
+                maxFilesToCopy: options.maxFilesToCopy || null
             })
         });
 
@@ -294,8 +295,14 @@ window.Balancer.execution = {
                     subtitle.textContent = status.completedAt ? `Completed at ${new Date(status.completedAt).toLocaleTimeString()}` : 'Completed';
                 }
                 if (notice) {
-                    notice.textContent = isSimulation ? 'Simulation finished successfully.' : 'Execution finished successfully.';
-                    notice.className = 'notice success';
+                    const errCount = (status.transferErrors || []).length;
+                    if (errCount > 0) {
+                        notice.textContent = `${isSimulation ? 'Simulation' : 'Execution'} completed with ${errCount} skipped file(s) due to locks or errors. See below for details.`;
+                        notice.className = 'notice info';
+                    } else {
+                        notice.textContent = isSimulation ? 'Simulation finished successfully.' : 'Execution finished successfully.';
+                        notice.className = 'notice success';
+                    }
                 }
             }
         } else {
@@ -493,6 +500,37 @@ window.Balancer.execution = {
                 </tr>
             `;
         }).join('');
+
+        // Populate Transfer Errors table if present in status
+        const errorsDetails = document.getElementById('details-exec-errors');
+        const errorsTbody = document.getElementById('exec-errors-tbody');
+        const errorsPill = document.getElementById('exec-errors-count-pill');
+        const transferErrors = status.transferErrors || [];
+
+        if (errorsDetails && errorsTbody) {
+            if (transferErrors.length > 0) {
+                errorsDetails.style.display = 'block';
+                if (errorsPill) errorsPill.textContent = `${transferErrors.length} Error${transferErrors.length > 1 ? 's' : ''}`;
+                errorsTbody.innerHTML = transferErrors.map(err => {
+                    const timeStr = err.timestampUtc ? new Date(err.timestampUtc).toLocaleTimeString() : '';
+                    return `
+                        <tr>
+                            <td style="color:var(--muted); font-size:11px; white-space:nowrap;">${timeStr}</td>
+                            <td style="white-space:nowrap;"><strong>${escapeHtml(err.sourceVolume)}</strong> → <strong>${escapeHtml(err.targetVolume)}</strong></td>
+                            <td style="text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap;">${formatBytes(err.sizeOnDisk || 0)}</td>
+                            <td style="word-break:break-all;" title="${escapeHtml(err.relativePath)}">
+                                <strong>${escapeHtml(err.fileName)}</strong><br>
+                                <span style="color:var(--muted); font-size:10px;">${escapeHtml(err.relativePath)}</span>
+                            </td>
+                            <td style="color:#b65b38; word-break:break-word;">${escapeHtml(err.errorMessage)}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } else {
+                errorsDetails.style.display = 'none';
+                errorsTbody.innerHTML = '';
+            }
+        }
     },
 
     renderFolderCleanup(summary, containerEl) {
@@ -621,6 +659,32 @@ window.Balancer.execution = {
                             <tr><td colspan="6"${placeholderClassAttr}${placeholderStyleAttr}>${placeholderText}</td></tr>
                         </tbody>
                     </table>
+
+                    <!-- Transfer Errors / Skipped Files Section -->
+                    <details id="details-exec-errors" class="sub-details" style="margin-top:18px; display:none;" open>
+                        <summary style="display:flex; justify-content:space-between; align-items:center;">
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span style="font-weight:700; color:#b65b38;">⚠️ Transfer Errors / Skipped Files</span>
+                                <span class="state-pill state-failed" id="exec-errors-count-pill" style="font-size:10px; padding:2px 8px;">0 Errors</span>
+                            </div>
+                            <span style="font-size:11px; color:var(--muted);">Files kept untouched on source drive due to locks or I/O errors</span>
+                        </summary>
+                        <div class="sub-content" style="padding:10px 0 0 0;">
+                            <table class="plan-table" id="exec-errors-table" style="width:100%; font-size:11px;">
+                                <thead>
+                                    <tr>
+                                        <th style="width:90px;">Time</th>
+                                        <th style="width:90px;">Route</th>
+                                        <th style="width:80px; text-align:right;">Size</th>
+                                        <th>File & Relative Path</th>
+                                        <th>Error Reason</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="exec-errors-tbody">
+                                </tbody>
+                            </table>
+                        </div>
+                    </details>
                 </div>
             </details>
         `;

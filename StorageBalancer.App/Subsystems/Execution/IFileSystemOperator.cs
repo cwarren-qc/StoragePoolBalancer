@@ -7,6 +7,10 @@ namespace StorageBalancer.App.Subsystems.Execution;
 
 public interface IFileSystemOperator
 {
+    /// <summary>
+    /// Transfers a single file from source to target.
+    /// The <paramref name="onBytesTransferred"/> callback receives the incremental chunk of bytes transferred in each step.
+    /// </summary>
     Task TransferFileAsync(
         FileMoveTask task,
         Action<long> onBytesTransferred,
