@@ -35,6 +35,25 @@ if (!window.Balancer.getVolumeColorMap) {
     };
 }
 
+if (!window.Balancer.getDetailsPref) {
+    window.Balancer.getDetailsPref = function (id, defaultVal = null) {
+        try {
+            const val = localStorage.getItem('user_details_' + id);
+            if (val === 'open') return true;
+            if (val === 'closed') return false;
+        } catch (e) {}
+        return defaultVal;
+    };
+}
+
+if (!window.Balancer.saveDetailsPref) {
+    window.Balancer.saveDetailsPref = function (id, isOpen) {
+        try {
+            localStorage.setItem('user_details_' + id, isOpen ? 'open' : 'closed');
+        } catch (e) {}
+    };
+}
+
 // Scan Status Metadata
 const volumeScanStatusReady = 'Ready';
 const volumeScanStatusQueued = 'Queued';
@@ -170,7 +189,7 @@ window.Balancer.scan = {
             <span class="state-pill" style="${pillStyle}" title="${totalFiles.toLocaleString()} files cataloged">Files: ${totalFiles.toLocaleString()}</span>
             <span class="state-pill" style="${pillStyle}" title="${totalFolders.toLocaleString()} folders cataloged">Folders: ${totalFolders.toLocaleString()}</span>
             <span class="state-pill" style="${pillStyle}" title="${window.Balancer.formatBytes(totalBytes)} scanned">Data: ${window.Balancer.formatBytes(totalBytes)}</span>
-            <span class="state-pill" style="${pillStyle}" title="Scan duration">TimeTaken: ${timeTakenStr}</span>
+            <span class="state-pill" style="${pillStyle}" title="Scan duration">Duration: ${timeTakenStr}</span>
         `;
     },
 
@@ -281,6 +300,9 @@ window.Balancer.scan = {
         const placeholderStyleAttr = options.placeholderStyle ? ` style="${options.placeholderStyle}"` : (options.placeholderClass ? '' : ' style="text-align:center; color:var(--muted); padding:20px;"');
         const placeholderText = options.placeholderText || 'No scan running.';
 
+        const volPref = window.Balancer.getDetailsPref ? window.Balancer.getDetailsPref('scan-details-volumes') : null;
+        const volOpen = volPref !== null ? volPref : (options.volumesOpen ?? true);
+
         el.innerHTML = `
             <details id="details-scan"${containerClass} ${openAttr}>
                 <summary style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
@@ -291,7 +313,7 @@ window.Balancer.scan = {
                     ${controlsHtml ? `<div style="display:flex; align-items:center; gap:8px;" onclick="event.stopPropagation();">${controlsHtml}</div>` : ''}
                 </summary>
                 <div class="content">
-                    <details class="sub-details" id="scan-details-volumes" open>
+                    <details class="sub-details" id="scan-details-volumes"${volOpen ? ' open' : ''}>
                         <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                             <span style="font-weight:700;" title="Volume storage scan status and cataloged metrics">Volumes</span>
                             <div id="scan-summary-pills" style="display:flex; align-items:center; gap:8px;"></div>

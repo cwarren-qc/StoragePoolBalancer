@@ -148,17 +148,55 @@
         const execTransferred = document.getElementById('exec-transferred');
         const execFiles = document.getElementById('exec-files');
         const execSpeed = document.getElementById('exec-speed');
+        const execDuration = document.getElementById('exec-duration');
+        const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
         const execProgressFill = document.getElementById('exec-progress-fill');
         const mainNotice = document.getElementById('main-notice');
 
         let appState = {
             config: null,
             isRunning: false,
+            isCancelling: false,
             currentStep: 0,
-            activeRunner: null,
             pollTimer: null,
-            activeSnapshotName: null
+            planRendered: false,
+            volumeColors: null
         };
+
+        const detailsState = {
+            step1Started: false,
+            step2Started: false,
+            step3Started: false
+        };
+
+        let programmaticUpdating = false;
+
+        function setDetailsOpen(id, isOpen) {
+            const el = document.getElementById(id);
+            if (!el || el.open === isOpen) return;
+            programmaticUpdating = true;
+            try {
+                el.open = isOpen;
+            } finally {
+                setTimeout(() => { programmaticUpdating = false; }, 50);
+            }
+        }
+
+        // Global capture listener: saves user clicks on ANY <details> summary anywhere on the page
+        document.addEventListener('toggle', (e) => {
+            if (e.isTrusted && !programmaticUpdating && e.target && e.target.id) {
+                window.Balancer.saveDetailsPref(e.target.id, e.target.open);
+            }
+        }, true);
+
+        function applySavedDetailsPreferences() {
+            ['details-scan', 'scan-details-volumes', 'details-plan', 'plan-details-volumes', 'details-exec'].forEach(id => {
+                const pref = window.Balancer.getDetailsPref(id);
+                if (pref !== null) {
+                    setDetailsOpen(id, pref);
+                }
+            });
+        }
 
         function showNotice(msg, type = 'info') {
             mainNotice.textContent = msg;
@@ -190,262 +228,345 @@
         }
 
         async function initPage() {
+            applySavedDetailsPreferences();
+
             try {
                 const res = await fetch('/api/config');
                 if (res.ok) {
                     appState.config = await res.json();
                 }
-            } catch (e) {}
+            } catch (e) {
+                console.error('Failed to load config:', e);
+            }
 
-            // Check if scan is currently running on server
             try {
-                const status = await Balancer.scan.fetchStatus();
-                if (status.isScanning) {
-                    appState.isRunning = true;
-                    btnStart.disabled = true;
-                    btnStart.style.display = 'none';
-                    btnCancel.style.display = 'inline-flex';
-                    btnCancel.disabled = false;
-                    setStepState(1, 'active', 'Scanning...');
-                    appState.activeSnapshotName = status.snapshotName;
-                    pollScanUntilComplete().then(onScanFinishedAfterReattach).catch(err => showNotice(err.message, 'error'));
-                    return;
-                }
-            } catch (e) {}
+                const res = await fetch('/api/process/status');
+                if (res.ok) {
+                    const status = await res.json();
 
-            // Check if real execution is currently running on server
-            try {
-                const execStatus = await Balancer.execution.fetchStatus();
-                if (execStatus.isRunning && !execStatus.isSimulation) {
-                    appState.isRunning = true;
-                    btnStart.disabled = true;
-                    btnStart.style.display = 'none';
-                    btnCancel.style.display = 'inline-flex';
-                    btnCancel.disabled = false;
-                    setStepState(1, 'completed', 'Completed');
-                    setStepState(2, 'completed', 'Completed');
-                    setStepState(3, 'active', 'Transferring...');
-                    document.getElementById('details-exec').open = true;
-                    execSummaryBar.style.display = 'flex';
-                    runExecution(appState.activeSnapshotName, null);
-                    return;
-                }
-            } catch (e) {}
-        }
+                    if (status.isRunning) {
+                        appState.isRunning = true;
+                        btnStart.disabled = true;
+                        btnStart.style.display = 'none';
+                        btnCancel.style.display = 'inline-flex';
+                        btnCancel.disabled = status.isCancellationRequested;
+                        btnCancel.textContent = status.isCancellationRequested ? 'Cancelling...' : 'Cancel Process';
+                        const maxFilesInput = document.getElementById('test-max-files');
+                        if (maxFilesInput) {
+                            if (status.maxFilesToCopy) maxFilesInput.value = status.maxFilesToCopy;
+                            maxFilesInput.disabled = true;
+                        }
 
-        async function onScanFinishedAfterReattach(status) {
-            if (!appState.isRunning) return;
-            setStepState(1, 'completed', 'Completed');
-            // Continue with Planning
-            await runPlanningAndExecution(status.snapshotName || appState.activeSnapshotName);
+                        renderProcessStatus(status);
+                        pollProcessStatus();
+                        return;
+                    }
+
+                    // Not running right now, but might have finished previously
+                    if (status.phase === 'Completed' || status.phase === 'Cancelled' || status.phase === 'Failed') {
+                        renderProcessStatus(status);
+                        handleProcessFinished(status);
+                        return;
+                    }
+
+                    // Idle state: If a scan was previously completed, render it
+                    if (status.scanStatus && !status.scanStatus.isScanning && status.scanStatus.scannedAt) {
+                        if (scanSubtitle) {
+                            scanSubtitle.textContent = `Scan finished at ${new Date(status.scanStatus.scannedAt).toLocaleTimeString()}`;
+                        }
+                        Balancer.scan.renderTable(status.scanStatus, scanTbody, appState.config?.volumes);
+                        const scanPref = window.Balancer.getDetailsPref('details-scan');
+                        const volPref = window.Balancer.getDetailsPref('scan-details-volumes');
+                        setDetailsOpen('details-scan', scanPref !== null ? scanPref : true);
+                        setDetailsOpen('scan-details-volumes', volPref !== null ? volPref : false);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load process status:', e);
+            }
         }
 
         async function startProcess() {
             if (appState.isRunning) return;
-            appState.isRunning = true;
             clearNotice();
+
+            const maxFilesInput = document.getElementById('test-max-files');
+            const maxFiles = maxFilesInput && maxFilesInput.value ? parseInt(maxFilesInput.value, 10) : null;
 
             btnStart.disabled = true;
             btnStart.style.display = 'none';
             btnCancel.style.display = 'inline-flex';
             btnCancel.disabled = false;
-            const maxFilesInput = document.getElementById('test-max-files');
+            btnCancel.textContent = 'Cancel Process';
             if (maxFilesInput) maxFilesInput.disabled = true;
 
-            // Full end-to-end run: Live Scan first
-            const now = new Date();
-            const snapPad = n => String(n).padStart(2, '0');
-            const snapName = `Balancing_${now.getFullYear()}-${snapPad(now.getMonth() + 1)}-${snapPad(now.getDate())}_${snapPad(now.getHours())}-${snapPad(now.getMinutes())}-${snapPad(now.getSeconds())}`;
-            appState.activeSnapshotName = snapName;
+            // Reset transitions and preferences for a fresh start
+            localStorage.removeItem('balancer_step1_transition_applied');
+            localStorage.removeItem('balancer_step2_transition_applied');
+            window.Balancer.saveDetailsPref('details-scan', true);
+            window.Balancer.saveDetailsPref('scan-details-volumes', true);
+            window.Balancer.saveDetailsPref('details-plan', false);
+            window.Balancer.saveDetailsPref('plan-details-volumes', false);
+            window.Balancer.saveDetailsPref('details-exec', false);
+
+            detailsState.step1Started = true;
+            detailsState.step2Started = false;
+            detailsState.step3Started = false;
 
             setStepState(1, 'active', 'Scanning...');
             setStepState(2, 'pending', 'Waiting for scan');
             setStepState(3, 'pending', 'Waiting for plan');
-            document.getElementById('details-scan').open = true;
-            const scanDetailsVolumes = document.getElementById('scan-details-volumes');
-            if (scanDetailsVolumes) scanDetailsVolumes.open = true;
+            if (scanSubtitle) scanSubtitle.textContent = 'Scanning volumes in progress...';
+
+            setDetailsOpen('details-scan', true);
+            setDetailsOpen('scan-details-volumes', true);
+            setDetailsOpen('details-plan', false);
+            setDetailsOpen('details-exec', false);
 
             try {
-                appState.currentStep = 1;
-                scanSubtitle.textContent = 'Scanning volumes in progress...';
-                await Balancer.scan.startScan(snapName);
-                await pollScanUntilComplete();
+                const res = await fetch('/api/process/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ maxFilesToCopy: maxFiles })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    throw new Error(err.Error || err.error || 'Failed to start process');
+                }
 
-                if (!appState.isRunning) return;
-                setStepState(1, 'completed', 'Completed');
-
-                await runPlanningAndExecution(snapName);
+                appState.isRunning = true;
+                appState.planRendered = false;
+                pollProcessStatus();
             } catch (err) {
-                showNotice(err.message || 'Scan encountered an error.', 'error');
-                setStepState(1, 'pending', 'Failed');
+                showNotice(err.message || 'Failed to start process', 'error');
                 stopProcessUI();
             }
-        }
-
-        async function runPlanningAndExecution(snapshotName) {
-            try {
-                // STEP 2: PLACEMENT PLANNING
-                appState.currentStep = 2;
-                setStepState(2, 'active', 'Simulating...');
-                document.getElementById('details-plan').open = true;
-                planSubtitle.textContent = 'Simulating placement rules...';
-                planResults.innerHTML = '<div style="padding:20px; text-align:center;"><span class="spinner"></span> Simulating placement rules and file balancing...</div>';
-
-                const plan = await Balancer.plan.generatePlan(snapshotName, false);
-                Balancer.plan.renderPlan(plan, planResults, { sectionsOpenByDefault: false });
-                planSubtitle.textContent = `Generated: ${new Date().toLocaleTimeString()}`;
-                setStepState(2, 'completed', 'Completed');
-
-                if (!appState.isRunning) return;
-
-                // STEP 3: EXECUTION
-                appState.currentStep = 3;
-                setStepState(3, 'active', 'Transferring...');
-                document.getElementById('details-exec').open = true;
-                execSubtitle.textContent = 'Executing file balancing plan...';
-                execSummaryBar.style.display = 'flex';
-
-                await runExecution(snapshotName, plan);
-
-                setStepState(3, 'completed', 'Completed');
-                execSubtitle.textContent = 'Finished';
-                showNotice('Process completed successfully! File balancing and empty folder cleanup executed.', 'success');
-            } catch (err) {
-                showNotice(err.message || 'Process encountered an error.', 'error');
-                if (appState.currentStep === 2) setStepState(2, 'pending', 'Failed');
-                if (appState.currentStep === 3) setStepState(3, 'pending', 'Failed');
-            } finally {
-                stopProcessUI();
-            }
-        }
-
-        function pollScanUntilComplete() {
-            return new Promise((resolve, reject) => {
-                async function check() {
-                    if (!appState.isRunning) return resolve();
-                    try {
-                        const status = await Balancer.scan.fetchStatus();
-                        Balancer.scan.renderTable(status, scanTbody, appState.config?.volumes);
-
-                        if (status.isScanning) {
-                            appState.pollTimer = setTimeout(check, 800);
-                        } else {
-                            const detailsVol = document.getElementById('scan-details-volumes');
-                            if (detailsVol) detailsVol.open = false;
-
-                            if (status.error) {
-                                reject(new Error(`Scan failed: ${status.error}`));
-                            } else {
-                                scanSubtitle.textContent = `Scan finished at ${new Date(status.scannedAt || Date.now()).toLocaleTimeString()}`;
-                                resolve(status);
-                            }
-                        }
-                    } catch (err) {
-                        reject(err);
-                    }
-                }
-                check();
-            });
-        }
-
-        function runExecution(snapshotName, plan) {
-            const volumeColors = Balancer.getVolumeColorMap(plan?.volumes || appState.config?.volumes || []);
-            appState.volumeColors = volumeColors;
-
-            execSubtitle.innerHTML = '<span class="spinner" style="width:12px; height:12px; margin-right:6px;"></span> Preparing execution... (Computing placement plan)';
-            execSummaryBar.style.display = 'flex';
-            execPct.textContent = 'Preparing...';
-            execTransferred.textContent = 'Analyzing...';
-            execFiles.textContent = 'Analyzing...';
-            execSpeed.textContent = '0 MB/s';
-            execProgressFill.style.width = '0%';
-            execTbody.innerHTML = `
-                <tr>
-                    <td colspan="6" style="text-align:center; padding:32px 16px; color:var(--deep); background:#eaf2ed; border-radius:6px;">
-                        <div style="display:flex; align-items:center; justify-content:center; gap:10px; font-size:14px; font-weight:700;">
-                            <span class="spinner" style="width:16px; height:16px;"></span>
-                            <span>Preparing execution... Computing file placements and transfer queues...</span>
-                        </div>
-                        <div style="font-size:12px; color:var(--muted); margin-top:6px;">
-                            Analyzing pool structure and balancing rules across volumes. Moves will begin in a few moments.
-                        </div>
-                    </td>
-                </tr>`;
-
-            const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
-            if (execFoldersCleaned) execFoldersCleaned.textContent = '-';
-
-            return new Promise(async (resolve, reject) => {
-                const maxFilesVal = document.getElementById('test-max-files')?.value;
-                const maxFilesToCopy = maxFilesVal ? parseInt(maxFilesVal, 10) : null;
-
-                try {
-                    await Balancer.execution.start({
-                        snapshotName,
-                        isSimulation: false,
-                        maxFilesToCopy
-                    });
-                } catch (startErr) {
-                    return reject(startErr);
-                }
-
-                async function pollStatus() {
-                    if (!appState.isRunning) return resolve();
-
-                    try {
-                        const status = await Balancer.execution.fetchStatus();
-
-                        Balancer.execution.renderStatusSummary(status, {
-                            subtitle: execSubtitle,
-                            pct: execPct,
-                            progressFill: execProgressFill,
-                            transferred: execTransferred,
-                            files: execFiles,
-                            speed: execSpeed,
-                            foldersCleaned: execFoldersCleaned,
-                            summaryBar: execSummaryBar
-                        });
-
-                        Balancer.execution.renderTable(status, execTbody, volumeColors);
-
-                        if (status.isRunning) {
-                            appState.pollTimer = setTimeout(pollStatus, 1000);
-                        } else {
-                            if (status.error) {
-                                reject(new Error(`Execution failed: ${status.error}`));
-                            } else {
-                                resolve();
-                            }
-                        }
-                    } catch (pollErr) {
-                        reject(pollErr);
-                    }
-                }
-
-                pollStatus();
-            });
         }
 
         async function cancelCurrentProcess() {
-            if (!appState.isRunning) return;
+            if (!appState.isRunning || appState.isCancelling) return;
+            appState.isCancelling = true;
             btnCancel.disabled = true;
             btnCancel.textContent = 'Cancelling...';
 
-            if (appState.currentStep === 1) {
-                try { await Balancer.scan.cancelScan(); } catch (e) {}
+            showNotice('Cancelling process...', 'info');
+            try {
+                await fetch('/api/process/cancel', { method: 'POST' });
+            } catch (e) {
+                console.error('Cancel process error:', e);
             }
-            if (appState.currentStep === 3) {
-                try { await Balancer.execution.cancel(); } catch (e) {}
+        }
+
+        async function pollProcessStatus() {
+            try {
+                const res = await fetch('/api/process/status');
+                if (!res.ok) {
+                    appState.pollTimer = setTimeout(pollProcessStatus, 800);
+                    return;
+                }
+                const status = await res.json();
+                renderProcessStatus(status);
+
+                if (status.isRunning) {
+                    appState.pollTimer = setTimeout(pollProcessStatus, 800);
+                } else {
+                    handleProcessFinished(status);
+                }
+            } catch (err) {
+                console.error('Error polling process status:', err);
+                appState.pollTimer = setTimeout(pollProcessStatus, 1200);
+            }
+        }
+
+        function renderProcessStatus(status) {
+            if (status.isCancellationRequested) {
+                btnCancel.disabled = true;
+                btnCancel.textContent = 'Cancelling...';
             }
 
-            if (appState.pollTimer) clearTimeout(appState.pollTimer);
-            appState.isRunning = false;
-            showNotice('Process was cancelled by the user.', 'error');
+            // Step 1: Scan status
+            if (status.scanStatus) {
+                Balancer.scan.renderTable(status.scanStatus, scanTbody, appState.config?.volumes);
+            }
+
+            if (status.currentStep === 1) {
+                setStepState(1, 'active', status.isCancellationRequested ? 'Cancelling...' : 'Scanning...');
+                setStepState(2, 'pending', 'Waiting for scan');
+                setStepState(3, 'pending', 'Waiting for plan');
+
+                if (scanSubtitle) scanSubtitle.textContent = status.isCancellationRequested ? 'Cancelling scan...' : 'Scanning volumes in progress...';
+
+                // Initial open when step 1 starts, respecting user preference if already saved
+                if (!detailsState.step1Started) {
+                    detailsState.step1Started = true;
+                    const scanPref = window.Balancer.getDetailsPref('details-scan');
+                    setDetailsOpen('details-scan', scanPref !== null ? scanPref : true);
+                    const volPref = window.Balancer.getDetailsPref('scan-details-volumes');
+                    setDetailsOpen('scan-details-volumes', volPref !== null ? volPref : true);
+                }
+            } else if (status.currentStep >= 2) {
+                setStepState(1, 'completed', 'Completed');
+                if (scanSubtitle && (!scanSubtitle.textContent || scanSubtitle.textContent === 'Not started' || scanSubtitle.textContent.startsWith('Scanning'))) {
+                    scanSubtitle.textContent = (status.scanStatus && status.scanStatus.scannedAt)
+                        ? `Scan finished at ${new Date(status.scanStatus.scannedAt).toLocaleTimeString()}`
+                        : 'Completed';
+                }
+
+                // One-time transition when Step 1 finishes:
+                // Force "State Scan" uncollapsed and "Volumes" under it collapsed. NEVER TOUCH that section again.
+                if (!localStorage.getItem('balancer_step1_transition_applied')) {
+                    localStorage.setItem('balancer_step1_transition_applied', 'true');
+                    setDetailsOpen('details-scan', true);
+                    setDetailsOpen('scan-details-volumes', false);
+                    window.Balancer.saveDetailsPref('details-scan', true);
+                    window.Balancer.saveDetailsPref('scan-details-volumes', false);
+                }
+            }
+
+            // Step 2: Planning status
+            if (status.currentStep === 2) {
+                setStepState(2, 'active', status.isCancellationRequested ? 'Cancelling...' : 'Simulating...');
+                setStepState(3, 'pending', 'Waiting for plan');
+
+                if (planSubtitle && !planSubtitle.textContent.startsWith('Generated:')) {
+                    planSubtitle.textContent = 'Simulating placement rules...';
+                }
+                if (!planResults.querySelector('.spinner')) {
+                    planResults.innerHTML = '<div style="padding:20px; text-align:center;"><span class="spinner"></span> Simulating placement rules and file balancing...</div>';
+                }
+
+                if (!detailsState.step2Started) {
+                    detailsState.step2Started = true;
+                    const planPref = window.Balancer.getDetailsPref('details-plan');
+                    setDetailsOpen('details-plan', planPref !== null ? planPref : true);
+                }
+            } else if (status.currentStep >= 3 || (status.hasPlan && !status.isRunning)) {
+                setStepState(2, 'completed', 'Completed');
+                if (!appState.planRendered && status.hasPlan) {
+                    appState.planRendered = true;
+                    loadAndRenderPlan();
+                }
+
+                // One-time transition when Step 2 finishes:
+                // Force "Placement Planning" uncollapsed and "Volume Utilization" under it collapsed. NEVER TOUCH that section again.
+                if (!localStorage.getItem('balancer_step2_transition_applied')) {
+                    localStorage.setItem('balancer_step2_transition_applied', 'true');
+                    setDetailsOpen('details-plan', true);
+                    setDetailsOpen('plan-details-volumes', false);
+                    window.Balancer.saveDetailsPref('details-plan', true);
+                    window.Balancer.saveDetailsPref('plan-details-volumes', false);
+                }
+            }
+
+            // Step 3: Execution status
+            if (status.currentStep === 3) {
+                setStepState(3, 'active', status.isCancellationRequested ? 'Cancelling...' : 'Transferring...');
+
+                if (!detailsState.step3Started) {
+                    detailsState.step3Started = true;
+                    const execPref = window.Balancer.getDetailsPref('details-exec');
+                    setDetailsOpen('details-exec', execPref !== null ? execPref : true);
+                }
+
+                if (execSubtitle) execSubtitle.textContent = status.isCancellationRequested
+                    ? 'Cancelling execution... Stopping active transfers...'
+                    : 'Executing file balancing plan...';
+                execSummaryBar.style.display = 'flex';
+
+                if (status.executionStatus) {
+                    const activeColors = appState.volumeColors || Balancer.getVolumeColorMap(status.executionStatus.volumes || appState.config?.volumes || []);
+                    appState.volumeColors = activeColors;
+
+                    Balancer.execution.renderStatusSummary(status.executionStatus, {
+                        subtitle: execSubtitle,
+                        pct: execPct,
+                        duration: execDuration,
+                        progressFill: execProgressFill,
+                        transferred: execTransferred,
+                        files: execFiles,
+                        speed: execSpeed,
+                        foldersCleaned: execFoldersCleaned,
+                        summaryBar: execSummaryBar,
+                        notice: mainNotice
+                    });
+                    Balancer.execution.renderTable(status.executionStatus, execTbody, activeColors);
+                }
+            }
+        }
+
+        async function loadAndRenderPlan() {
+            try {
+                const res = await fetch('/api/process/plan');
+                if (res.ok) {
+                    const plan = await res.json();
+                    Balancer.plan.renderPlan(plan, planResults, { sectionsOpenByDefault: false });
+                    if (planSubtitle) planSubtitle.textContent = `Generated: ${new Date(plan.snapshotScannedAt || Date.now()).toLocaleTimeString()}`;
+                }
+            } catch (err) {
+                console.error('Failed to load plan:', err);
+            }
+        }
+
+        function handleProcessFinished(status) {
             stopProcessUI();
+
+            if (status.scanStatus) {
+                Balancer.scan.renderTable(status.scanStatus, scanTbody, appState.config?.volumes);
+            }
+
+            if (status.hasPlan && !appState.planRendered) {
+                appState.planRendered = true;
+                loadAndRenderPlan();
+            }
+
+            if (status.executionStatus) {
+                const activeColors = appState.volumeColors || Balancer.getVolumeColorMap(status.executionStatus.volumes || appState.config?.volumes || []);
+                appState.volumeColors = activeColors;
+
+                Balancer.execution.renderStatusSummary(status.executionStatus, {
+                    subtitle: execSubtitle,
+                    pct: execPct,
+                    duration: execDuration,
+                    progressFill: execProgressFill,
+                    transferred: execTransferred,
+                    files: execFiles,
+                    speed: execSpeed,
+                    foldersCleaned: execFoldersCleaned,
+                    summaryBar: execSummaryBar,
+                    notice: mainNotice
+                });
+                Balancer.execution.renderTable(status.executionStatus, execTbody, activeColors);
+            }
+
+            if (status.phase === 'Completed') {
+                setStepState(1, 'completed', 'Completed');
+                setStepState(2, 'completed', 'Completed');
+                setStepState(3, 'completed', 'Completed');
+                if (execSubtitle) execSubtitle.textContent = 'Finished';
+                showNotice('Process completed successfully! File balancing and empty folder cleanup executed.', 'success');
+            } else if (status.phase === 'Cancelled') {
+                if (status.currentStep === 1) setStepState(1, 'pending', 'Cancelled');
+                if (status.currentStep >= 2) setStepState(1, 'completed', 'Completed');
+                if (status.currentStep === 2) setStepState(2, 'pending', 'Cancelled');
+                if (status.currentStep >= 3) setStepState(2, 'completed', 'Completed');
+                if (status.currentStep === 3) setStepState(3, 'pending', 'Cancelled');
+
+                if (status.currentStep === 1 && scanSubtitle) scanSubtitle.textContent = 'Scan cancelled by user';
+                if (status.currentStep === 3 && execSubtitle) execSubtitle.textContent = 'Execution cancelled by user';
+
+                showNotice('Process was cancelled by the user.', 'info');
+            } else if (status.phase === 'Failed') {
+                if (status.currentStep === 1) setStepState(1, 'pending', 'Failed');
+                if (status.currentStep === 2) setStepState(2, 'pending', 'Failed');
+                if (status.currentStep === 3) setStepState(3, 'pending', 'Failed');
+
+                showNotice(status.error || 'Process stopped with error.', 'error');
+            }
         }
 
         function stopProcessUI() {
             appState.isRunning = false;
+            appState.isCancelling = false;
             if (appState.pollTimer) clearTimeout(appState.pollTimer);
             btnStart.disabled = false;
             btnStart.style.display = 'inline-flex';

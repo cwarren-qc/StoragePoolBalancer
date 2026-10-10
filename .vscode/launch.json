@@ -17,7 +17,6 @@
                 "uriFormat": "%s"
             },
             "env": {
-                "CONFIG_FOLDER": "${workspaceFolder}/../StoragePoolBalancer.TestEnv/config",
                 "ASPNETCORE_CONTENTROOT": "${workspaceFolder}/StorageBalancer.App"
             }
         }

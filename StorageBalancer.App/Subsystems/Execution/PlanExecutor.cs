@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Domain;
+using StorageBalancer.App.Subsystems.Logging;
 using StorageBalancer.App.Subsystems.Planning;
 using StorageBalancer.App.Subsystems.Storage;
 
@@ -18,6 +19,7 @@ public class PlanExecutor
 {
     private readonly PlacementPlanner _planner;
     private readonly JsonStateRepository _stateRepository;
+    private readonly IAppEventLogger? _logger;
 
     private readonly object _stateLock = new();
     private bool _isRunning;
@@ -26,6 +28,7 @@ public class PlanExecutor
     private DateTime? _startedAt;
     private DateTime? _completedAt;
     private string? _error;
+    private string? _snapshotName;
 
     private long _totalBytes;
     private long _transferredBytes;
@@ -40,11 +43,15 @@ public class PlanExecutor
     private int? _maxFilesToCopy;
     private long _lastDiagnosticLogTicks;
     private readonly List<TransferErrorItem> _transferErrors = new();
+    private readonly List<TransferredFileRecord> _completedTransfers = new();
+    private readonly List<CleanedFolderRecord> _cleanedFolders = new();
+    private PlacementPlan? _currentPlan;
 
-    public PlanExecutor(PlacementPlanner planner, JsonStateRepository stateRepository)
+    public PlanExecutor(PlacementPlanner planner, JsonStateRepository stateRepository, IAppEventLogger? logger = null)
     {
         _planner = planner;
         _stateRepository = stateRepository;
+        _logger = logger;
     }
 
     public ExecutionStatus GetStatus()
@@ -87,7 +94,8 @@ public class PlanExecutor
                 activeTransfers,
                 _phase,
                 _folderCleanup,
-                _transferErrors.ToImmutableList()
+                _transferErrors.ToImmutableList(),
+                _snapshotName
             );
         }
     }
@@ -138,7 +146,8 @@ public class PlanExecutor
     public bool TryStartExecution(
         AppConfig config,
         PoolSnapshot snapshot,
-        ExecutionStartRequest request)
+        ExecutionStartRequest request,
+        string? snapshotsFolder = null)
     {
         lock (_stateLock)
         {
@@ -147,6 +156,7 @@ public class PlanExecutor
             _isRunning = true;
             _isSimulation = request.IsSimulation;
             _cts = new CancellationTokenSource();
+            _snapshotName = request.SnapshotName;
             _startedAt = DateTime.UtcNow;
             _completedAt = null;
             _error = null;
@@ -160,6 +170,9 @@ public class PlanExecutor
             _volumeStates.Clear();
             _activeTransfers.Clear();
             _transferErrors.Clear();
+            _completedTransfers.Clear();
+            _cleanedFolders.Clear();
+            _currentPlan = null;
 
             int maxThreads = request.MaxThreads.GetValueOrDefault(config.MaxExecutionThreads);
             if (maxThreads < 1) maxThreads = 1;
@@ -182,6 +195,8 @@ public class PlanExecutor
             var token = _cts.Token;
             string snapName = request.SnapshotName ?? string.Empty;
 
+            _logger?.LogInfo("Plan Execution", $"Started execution for snapshot '{snapName}'. Mode: {(request.IsSimulation ? "Simulation" : "Live Execution")}, MaxThreads: {maxThreads}, Limit: {(request.MaxFilesToCopy.HasValue ? request.MaxFilesToCopy.Value.ToString() : "unlimited")}.");
+
             Task.Run(async () =>
             {
                 try
@@ -196,7 +211,13 @@ public class PlanExecutor
                         _completedAt = DateTime.UtcNow;
                         _isRunning = false;
                         _phase = ExecutionPhase.Cancelled;
+                        _activeTransfers.Clear();
+                        foreach (var v in _volumeStates.Values)
+                        {
+                            v.SetActivity("Cancelled", VolumeActivityStatus.Idle);
+                        }
                     }
+                    _logger?.LogWarning("Plan Execution", "Plan execution was cancelled by user.");
                 }
                 catch (Exception ex)
                 {
@@ -206,16 +227,92 @@ public class PlanExecutor
                         _completedAt = DateTime.UtcNow;
                         _isRunning = false;
                         _phase = ExecutionPhase.Failed;
+                        _activeTransfers.Clear();
+                        foreach (var v in _volumeStates.Values)
+                        {
+                            v.SetActivity("Failed", VolumeActivityStatus.Idle);
+                        }
                     }
+                    _logger?.LogError("Plan Execution", $"Plan execution failed: {ex.Message}", ex);
                 }
                 finally
                 {
+                    ExecutionPhase finalPhase;
+                    DateTime? finalStartedAt;
+                    DateTime? finalCompletedAt;
+                    long finalTransferredFiles;
+                    long finalTotalFiles;
+                    long finalTransferredBytes;
+                    long finalTotalBytes;
+                    string? finalError;
+                    List<TransferredFileRecord> finalTransfers;
+                    List<TransferErrorItem> finalErrors;
+                    List<CleanedFolderRecord> finalCleaned;
+                    List<VolumeExecutionProgress> finalVolProgress;
+                    PlacementPlan? finalPlan;
+
                     lock (_stateLock)
                     {
                         _isRunning = false;
                         _activeTransfers.Clear();
                         if (_completedAt == null) _completedAt = DateTime.UtcNow;
+
+                        if (_phase == ExecutionPhase.Cancelled || _phase == ExecutionPhase.Failed)
+                        {
+                            foreach (var v in _volumeStates.Values)
+                            {
+                                if (v.Status == VolumeActivityStatus.CleaningFolders || v.Status == VolumeActivityStatus.Reading || v.Status == VolumeActivityStatus.Writing)
+                                {
+                                    v.SetActivity(_phase == ExecutionPhase.Cancelled ? "Cancelled" : "Failed", VolumeActivityStatus.Idle);
+                                }
+                            }
+                        }
+
+                        finalPhase = _phase;
+                        finalStartedAt = _startedAt;
+                        finalCompletedAt = _completedAt;
+                        finalTransferredFiles = _transferredFiles;
+                        finalTotalFiles = _totalFiles;
+                        finalTransferredBytes = _transferredBytes;
+                        finalTotalBytes = _totalBytes;
+                        finalError = _error;
+                        finalTransfers = _completedTransfers.ToList();
+                        finalErrors = _transferErrors.ToList();
+                        finalCleaned = _cleanedFolders.ToList();
+                        finalVolProgress = _volumeStates.Values.Select(v => v.ToProgress()).ToList();
+                        finalPlan = _currentPlan ?? _cachedPlan?.Plan;
                     }
+
+                    if (finalPhase == ExecutionPhase.Completed)
+                    {
+                        var duration = (finalCompletedAt ?? DateTime.UtcNow) - (finalStartedAt ?? DateTime.UtcNow);
+                        _logger?.LogInfo("Plan Execution", $"Plan execution completed successfully in {duration.TotalSeconds:F1}s. Transferred {finalTransferredFiles:N0} files ({finalTransferredBytes:N0} bytes).");
+                    }
+
+                    string targetFolder = !string.IsNullOrWhiteSpace(snapshotsFolder)
+                        ? snapshotsFolder
+                        : (!string.IsNullOrWhiteSpace(config.SnapshotsFolder) ? config.SnapshotsFolder : "snapshots");
+
+                    ProcessSummaryReporter.WriteReport(
+                        targetFolder,
+                        config,
+                        snapshot,
+                        snapName,
+                        finalPlan,
+                        finalPhase,
+                        finalStartedAt,
+                        finalCompletedAt,
+                        finalTransferredFiles,
+                        finalTotalFiles,
+                        finalTransferredBytes,
+                        finalTotalBytes,
+                        finalError,
+                        finalTransfers,
+                        finalErrors,
+                        finalCleaned,
+                        finalVolProgress,
+                        _logger
+                    );
                 }
             }, token);
 
@@ -229,6 +326,7 @@ public class PlanExecutor
         {
             if (!_isRunning || _cts == null) return false;
             _cts.Cancel();
+            _logger?.LogWarning("Plan Execution", "Cancellation requested for plan execution.");
             return true;
         }
     }
@@ -315,6 +413,7 @@ public class PlanExecutor
                 );
                 _cachedPlan = new CachedPlan(snapshotName, snapshot.ScannedAt, fingerprint, plan);
             }
+            _currentPlan = plan;
         }
 
         var diskMap = config.Volumes.ToDictionary(v => v.Alias, v => string.IsNullOrWhiteSpace(v.Disk) ? v.Alias : v.Disk, StringComparer.OrdinalIgnoreCase);
@@ -518,6 +617,8 @@ public class PlanExecutor
             _activeTransfers.Clear();
         }
 
+        ct.ThrowIfCancellationRequested();
+
         lock (_stateLock)
         {
             _phase = ExecutionPhase.CleaningFolders;
@@ -550,6 +651,18 @@ public class PlanExecutor
                 );
 
                 await fsOperator.DeleteFolderAsync(cleanupTask, ct).ConfigureAwait(false);
+
+                lock (_stateLock)
+                {
+                    _cleanedFolders.Add(new CleanedFolderRecord(
+                        DateTime.UtcNow,
+                        action.VolumeAlias,
+                        action.RelativePath,
+                        action.PrimaryVolumeAlias
+                    ));
+                }
+
+                _logger?.LogInfo("Plan Execution", $"Cleaned redundant folder '{action.RelativePath}' on {action.VolumeAlias} (primary on {action.PrimaryVolumeAlias}).");
             }
         }
 
@@ -744,6 +857,8 @@ public class PlanExecutor
                     {
                         Console.WriteLine($"\n[Thread {workerId}] FAILED COPYING: {currentTask.SourceVolume} to {currentTask.TargetVolume}, {currentTask.RelativePath}\n  -> Reason: {ex.GetType().Name} - {ex.Message}\n");
 
+                        _logger?.LogError("Plan Execution", $"Failed transferring '{currentTask.FileName}' ({currentTask.RelativePath}) from {currentTask.SourceVolume} to {currentTask.TargetVolume}: {ex.Message}", ex);
+
                         var errorItem = new TransferErrorItem(
                             currentTask.SourceVolume,
                             currentTask.TargetVolume,
@@ -779,6 +894,21 @@ public class PlanExecutor
                             srcState.CompleteMovedOut(currentTask.TargetVolume, currentTask.SizeOnDisk);
                         if (_volumeStates.TryGetValue(currentTask.TargetVolume, out var tgtState))
                             tgtState.CompleteMovedIn(currentTask.SourceVolume, currentTask.SizeOnDisk);
+
+                        lock (_stateLock)
+                        {
+                            _completedTransfers.Add(new TransferredFileRecord(
+                                DateTime.UtcNow,
+                                currentTask.SourceVolume,
+                                currentTask.TargetVolume,
+                                currentTask.RelativePath,
+                                currentTask.FileName,
+                                currentTask.SizeOnDisk,
+                                sw.Elapsed
+                            ));
+                        }
+
+                        _logger?.LogInfo("Plan Execution", $"Transferred '{currentTask.FileName}' ({currentTask.SizeOnDisk:N0} bytes) from {currentTask.SourceVolume} to {currentTask.TargetVolume} in {sw.Elapsed.TotalSeconds:F2}s.");
 
                         if (_maxFilesToCopy.HasValue && completedCount >= _maxFilesToCopy.Value)
                         {

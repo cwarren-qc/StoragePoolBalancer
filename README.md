@@ -14,7 +14,7 @@ Open [http://localhost:5000](http://localhost:5000) for the pool summary. Use Co
 
 Start Scan opens a separate progress page. Enter a snapshot name or leave it blank to use the current date and time. Set a snapshots folder on the Configuration page before scanning; scans return a clear error if it is missing. Completed scans are saved as JSON files there. Use Cancel scan to stop an active scan. `ASPNETCORE_URLS` can override the default listening address.
 
-The application writes `config.json` in its working directory by default. Set `CONFIG_FOLDER` to store it in another directory; relative paths resolve from the process working directory. The VS Code launch profile sets it to `${workspaceFolder}/../StoragePoolBalancer.TestEnv/config`, keeps the workspace root as its working directory, and sets the app project as its content root so `wwwroot` is served. Keep machine-specific disk paths out of source control. GitHub Actions builds the solution in Release mode on pushes and pull requests.
+The application writes `config.json` in the `config/` subfolder (`config/config.json`). Keep machine-specific disk paths out of source control. GitHub Actions builds the solution in Release mode on pushes and pull requests.
 
 The Configuration page accepts one case-insensitive .NET regular expression per line under Never-move patterns. Patterns match pool-relative paths; a matching folder and its descendants are excluded from placement, and the planner splits ancestor folders as needed to keep excluded content in place. For example, `\$RECYCLE.BIN\\.*` matches files and folders inside `$RECYCLE.BIN`.
 

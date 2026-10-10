@@ -48,12 +48,11 @@ public class ConfigManager
     private readonly string _configPath;
     private readonly JsonSerializerOptions _options = new() { WriteIndented = true };
 
-    public ConfigManager()
+    public ConfigManager(string? configPath = null)
     {
-        var configuredFolder = Environment.GetEnvironmentVariable("CONFIG_FOLDER");
-        _configPath = string.IsNullOrWhiteSpace(configuredFolder)
-            ? Path.GetFullPath("config.json")
-            : Path.Combine(Path.GetFullPath(configuredFolder), "config.json");
+        _configPath = !string.IsNullOrWhiteSpace(configPath)
+            ? Path.GetFullPath(configPath)
+            : Path.GetFullPath(Path.Combine("config", "config.json"));
     }
 
     public AppConfig Load()

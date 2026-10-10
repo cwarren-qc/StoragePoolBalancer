@@ -402,3 +402,25 @@ details:not([open]) > summary .plan-stayed-intact-toggle {
     display: none !important;
 }
 
+/* Active Transfer Pulsing / Flashing Segment */
+@keyframes segment-flash {
+    0%, 100% {
+        opacity: 1;
+        filter: brightness(1);
+    }
+    50% {
+        opacity: 0.35;
+        filter: brightness(3.5);
+        background-color: #ffffff !important;
+    }
+}
+
+.provenance-segment.is-active-transfer {
+    min-width: 6px !important;
+    animation: segment-flash 0.9s ease-in-out infinite;
+    position: relative;
+    z-index: 2;
+    box-shadow: 0 0 5px rgba(255, 255, 255, 0.95), inset 0 0 2px #ffffff;
+    outline: 1px solid rgba(255, 255, 255, 0.9);
+}
+

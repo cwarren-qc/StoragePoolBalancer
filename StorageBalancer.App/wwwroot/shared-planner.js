@@ -141,11 +141,13 @@ window.Balancer.plan = {
     },
 
     async generatePlan(snapshotName, includeFiles = false) {
-        if (!snapshotName) throw new Error('Choose a snapshot.');
+        const body = (snapshotName && snapshotName !== 'in-memory' && snapshotName !== 'In-Memory Scan')
+            ? { snapshotName, includeFiles }
+            : { snapshotName: 'in-memory', includeFiles };
         const res = await fetch('/api/plan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ snapshotName, includeFiles })
+            body: JSON.stringify(body)
         });
         const plan = await res.json();
         if (!res.ok) throw new Error(plan.Error || plan.error || 'Failed to generate plan');
@@ -277,11 +279,20 @@ window.Balancer.plan = {
 
         const stayingInPlaceDisplay = placementLogicConfigs.find(c => c.name === logicAppliedStayingInPlace)?.displayName || 'Staying in place';
 
+        const volPref = window.Balancer.getDetailsPref ? window.Balancer.getDetailsPref('plan-details-volumes') : null;
+        const volOpen = volPref !== null ? volPref : Boolean(sectionsOpen);
+
+        const placementsPref = window.Balancer.getDetailsPref ? window.Balancer.getDetailsPref('plan-details-placements') : null;
+        const placementsOpen = placementsPref !== null ? placementsPref : Boolean(sectionsOpen);
+
+        const cleanupPref = window.Balancer.getDetailsPref ? window.Balancer.getDetailsPref('plan-details-cleanup') : null;
+        const cleanupOpen = cleanupPref !== null ? cleanupPref : Boolean(sectionsOpen);
+
         containerEl.innerHTML = `
             ${warningsHtml}
 
             <!-- COLLAPSIBLE SECTION 1: VOLUME UTILIZATION -->
-            <details class="sub-details" id="plan-details-volumes" ${sectionsOpen ? 'open' : ''}>
+            <details class="sub-details" id="plan-details-volumes"${volOpen ? ' open' : ''}>
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Volume storage capacity and simulated utilization before and after balancing">Volume Utilization</span>
                     <div style="display:flex; align-items:center; gap:8px;">
@@ -317,7 +328,7 @@ window.Balancer.plan = {
             </details>
 
             <!-- COLLAPSIBLE SECTION 2: PATH PLACEMENTS -->
-            <details class="sub-details" id="plan-details-placements" ${sectionsOpen ? 'open' : ''} style="margin-top:16px;">
+            <details class="sub-details" id="plan-details-placements"${placementsOpen ? ' open' : ''} style="margin-top:16px;">
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Folder placement decisions and file balancing rules">Path Placements</span>
                     <div style="display:flex; align-items:center; gap:8px;">
@@ -345,7 +356,7 @@ window.Balancer.plan = {
                 </div>
             </details>
             <!-- COLLAPSIBLE SECTION 3: EMPTY FOLDER CLEANUP -->
-            <details class="sub-details" id="plan-details-cleanup" ${sectionsOpen ? 'open' : ''} style="margin-top:16px; ${plan.folderCleanup ? '' : 'display:none;'}">
+            <details class="sub-details" id="plan-details-cleanup"${cleanupOpen ? ' open' : ''} style="margin-top:16px; ${plan.folderCleanup ? '' : 'display:none;'}">
                 <summary style="cursor:pointer; display:flex; justify-content:space-between; align-items:center;">
                     <span style="font-weight:700;" title="Safe empty folder cleanup and migration planned across pool volumes">Empty Folder Cleanup</span>
                     <div style="display:flex; align-items:center; gap:8px;">

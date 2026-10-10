@@ -15,6 +15,36 @@ public enum FolderCleanupStatus
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
+public enum ProcessPipelinePhase
+{
+    Idle,
+    Scanning,
+    Planning,
+    Executing,
+    Completed,
+    Cancelled,
+    Failed
+}
+
+public record ProcessStartRequest(
+    int? MaxFilesToCopy = null
+);
+
+public record ProcessPipelineStatus(
+    bool IsRunning,
+    bool IsCancellationRequested,
+    int CurrentStep,
+    ProcessPipelinePhase Phase,
+    DateTime? StartedAt,
+    DateTime? CompletedAt,
+    string? Error,
+    int? MaxFilesToCopy,
+    StorageBalancer.App.Subsystems.Scanner.ScanStatus? ScanStatus,
+    ExecutionStatus? ExecutionStatus,
+    bool HasPlan
+);
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ExecutionPhase
 {
     Idle,
@@ -151,6 +181,24 @@ public record ExecutionStatus(
     ImmutableList<ActiveTransferInfo> ActiveTransfers,
     ExecutionPhase Phase = ExecutionPhase.Idle,
     FolderCleanupSummary? FolderCleanup = null,
-    ImmutableList<TransferErrorItem>? TransferErrors = null
+    ImmutableList<TransferErrorItem>? TransferErrors = null,
+    string? SnapshotName = null
+);
+
+public record TransferredFileRecord(
+    DateTime TimestampUtc,
+    string SourceVolume,
+    string TargetVolume,
+    string RelativePath,
+    string FileName,
+    long SizeOnDisk,
+    TimeSpan Duration
+);
+
+public record CleanedFolderRecord(
+    DateTime TimestampUtc,
+    string VolumeAlias,
+    string RelativePath,
+    string PrimaryVolumeAlias
 );
 

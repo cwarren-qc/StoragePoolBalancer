@@ -6,6 +6,7 @@ using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Subsystems.Scanner;
 using StorageBalancer.App.Subsystems.Planning;
 using StorageBalancer.App.Subsystems.Execution;
+using StorageBalancer.App.Subsystems.Logging;
 using StorageBalancer.App.Domain;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -17,11 +18,13 @@ using System.Collections.Immutable;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddSingleton<IAppEventLogger, AppEventLogger>();
 builder.Services.AddSingleton<ConfigManager>();
 builder.Services.AddSingleton<JsonStateRepository>();
 builder.Services.AddSingleton<StateScanner>();
 builder.Services.AddSingleton<PlacementPlanner>();
 builder.Services.AddSingleton<PlanExecutor>();
+builder.Services.AddSingleton<ProcessCoordinator>();
 
 builder.Services.AddEndpointsApiExplorer();
 
@@ -84,33 +87,38 @@ app.MapPost("/api/scan", (ScanStartRequest? request, ConfigManager configManager
 {
     var config = configManager.Load();
 
-    if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
-        return Results.BadRequest(new { Error = "Snapshots folder is not configured." });
-
     if (config.Volumes.Count == 0)
         return Results.BadRequest(new { Error = "Add at least one volume before scanning." });
 
-    var snapshotName = string.IsNullOrWhiteSpace(request?.SnapshotName)
-        ? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss")
+    bool saveToDisk = request?.SaveToDisk ?? (!string.IsNullOrWhiteSpace(request?.SnapshotName) && !string.Equals(request.SnapshotName, "in-memory", StringComparison.OrdinalIgnoreCase));
+
+    string snapshotName = string.IsNullOrWhiteSpace(request?.SnapshotName) || string.Equals(request.SnapshotName, "in-memory", StringComparison.OrdinalIgnoreCase)
+        ? "In-Memory Scan"
         : request.SnapshotName.Trim();
 
-    if (snapshotName.Length > 120 || snapshotName is "." or ".." || snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-        return Results.BadRequest(new { Error = "Use a snapshot name of 120 characters or fewer without filename-invalid characters." });
-
-    string snapshotPath;
-    try
+    string? snapshotPath = null;
+    if (saveToDisk)
     {
-        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
-        var baseName = GetSnapshotBaseName(snapshotName);
+        if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
+            return Results.BadRequest(new { Error = "Snapshots folder is not configured." });
 
-        if (ResolveSnapshotFilePath(snapshotFolder, baseName) != null)
-            return Results.Conflict(new { Error = $"A snapshot named '{snapshotName}' already exists." });
+        if (snapshotName.Length > 120 || snapshotName is "." or ".." || snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            return Results.BadRequest(new { Error = "Use a snapshot name of 120 characters or fewer without filename-invalid characters." });
 
-        snapshotPath = Path.Combine(snapshotFolder, $"{baseName}.snapshot");
-    }
-    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
-    {
-        return Results.BadRequest(new { Error = "The configured snapshots folder is not a valid path." });
+        try
+        {
+            var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+            var baseName = GetSnapshotBaseName(snapshotName);
+
+            if (ResolveSnapshotFilePath(snapshotFolder, baseName) != null)
+                return Results.Conflict(new { Error = $"A snapshot named '{snapshotName}' already exists." });
+
+            snapshotPath = Path.Combine(snapshotFolder, $"{baseName}.snapshot");
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return Results.BadRequest(new { Error = "The configured snapshots folder is not a valid path." });
+        }
     }
 
     if (!scanner.TryStartScan(config, snapshotName, snapshotPath))
@@ -181,37 +189,84 @@ app.MapGet("/api/snapshots", (ConfigManager configManager, IWebHostEnvironment e
     return Results.Ok(snapshots);
 });
 
-app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, JsonStateRepository repository, PlacementPlanner planner, PlanExecutor executor, IWebHostEnvironment environment) =>
+app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, JsonStateRepository repository, PlacementPlanner planner, PlanExecutor executor, StateScanner scanner, ProcessCoordinator coordinator, IWebHostEnvironment environment, IAppEventLogger logger) =>
 {
-    if (string.IsNullOrWhiteSpace(request?.SnapshotName))
-        return Results.BadRequest(new { Error = "Choose a snapshot." });
-
-    var snapshotName = request.SnapshotName.Trim();
-    if (snapshotName.Length > 120 ||
-        snapshotName is "." or ".." ||
-        snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
-        snapshotName.Contains('/') ||
-        snapshotName.Contains('\\') ||
-        !string.Equals(Path.GetFileName(snapshotName), snapshotName, StringComparison.Ordinal))
-    {
-        return Results.BadRequest(new { Error = "Choose a valid snapshot name." });
-    }
-
     var config = configManager.Load();
-    if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
-        return Results.BadRequest(new { Error = "Configure a snapshots folder before generating a plan." });
+
+    bool isInMemory = string.IsNullOrWhiteSpace(request?.SnapshotName) ||
+                      string.Equals(request.SnapshotName, "in-memory", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(request.SnapshotName, "In-Memory Scan", StringComparison.OrdinalIgnoreCase);
+
+    PoolSnapshot? snapshot;
+    string snapshotName;
+
+    if (isInMemory)
+    {
+        snapshot = scanner.GetLastSnapshot();
+        if (snapshot is null)
+            return Results.BadRequest(new { Error = "No in-memory scan available. Run a state scan first." });
+
+        snapshotName = "In-Memory Scan";
+
+        var existingPlan = coordinator.GetCurrentPlan();
+        if (existingPlan != null && existingPlan.SnapshotScannedAt == snapshot.ScannedAt)
+        {
+            if (request?.IncludeFiles == true)
+            {
+                return Results.Ok(existingPlan);
+            }
+
+            var stripped = existingPlan.Placements
+                .Select(p => p with { Files = null })
+                .ToImmutableArray();
+
+            return Results.Ok(existingPlan with { Placements = stripped });
+        }
+    }
+    else
+    {
+        snapshotName = request!.SnapshotName!.Trim();
+        if (snapshotName.Length > 120 ||
+            snapshotName is "." or ".." ||
+            snapshotName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            snapshotName.Contains('/') ||
+            snapshotName.Contains('\\') ||
+            !string.Equals(Path.GetFileName(snapshotName), snapshotName, StringComparison.Ordinal))
+        {
+            return Results.BadRequest(new { Error = "Choose a valid snapshot name." });
+        }
+
+        if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
+            return Results.BadRequest(new { Error = "Configure a snapshots folder before generating a plan." });
+
+        try
+        {
+            var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+            var snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
+            if (snapshotPath is null)
+                return Results.NotFound(new { Error = "The selected snapshot was not found." });
+
+            snapshot = repository.LoadSnapshot(snapshotPath);
+            if (snapshot is null)
+                return Results.NotFound(new { Error = "The selected snapshot was not found." });
+        }
+        catch (InvalidDataException exception)
+        {
+            return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {exception.Message}" });
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest(new { Error = "The selected file is not a valid snapshot." });
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException)
+        {
+            return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {exception.Message}" });
+        }
+    }
 
     try
     {
-        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
-        var snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
-        if (snapshotPath is null)
-            return Results.NotFound(new { Error = "The selected snapshot was not found." });
-
-        var snapshot = repository.LoadSnapshot(snapshotPath);
-        if (snapshot is null)
-            return Results.NotFound(new { Error = "The selected snapshot was not found." });
-
+        logger.LogInfo("Balancing", $"Generating placement plan for snapshot '{snapshotName}'...");
         var fullPlan = planner.CreatePlan(
             snapshot,
             config.FilePlacementRules,
@@ -221,6 +276,10 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
             includeFiles: true);
 
         executor.CachePlan(snapshotName, snapshot.ScannedAt, config, fullPlan);
+
+        long totalMoveBytes = fullPlan.Placements.Sum(p => p.SizeMoved);
+        long totalFilesMoved = fullPlan.Volumes.Sum(v => v.FilesMovedIn);
+        logger.LogInfo("Balancing", $"Generated plan for snapshot '{snapshotName}'. Total placements: {fullPlan.Placements.Length}, files moving: {totalFilesMoved:N0}, data moving: {totalMoveBytes:N0} bytes.");
 
         if (request?.IncludeFiles == true)
         {
@@ -233,66 +292,85 @@ app.MapPost("/api/plan", (PlanRequest? request, ConfigManager configManager, Jso
 
         return Results.Ok(fullPlan with { Placements = strippedPlacements });
     }
-    catch (InvalidDataException exception)
+    catch (Exception exception)
     {
-        return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {exception.Message}" });
-    }
-    catch (JsonException)
-    {
-        return Results.BadRequest(new { Error = "The selected file is not a valid snapshot." });
-    }
-    catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or IOException)
-    {
-        return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {exception.Message}" });
+        logger.LogError("Balancing", $"Failed to generate plan for snapshot '{snapshotName}': {exception.Message}", exception);
+        return Results.BadRequest(new { Error = $"Failed to generate plan: {exception.Message}" });
     }
 });
 
-app.MapPost("/api/execution/start", (ExecutionStartRequest? request, ConfigManager configManager, JsonStateRepository repository, PlanExecutor executor, IWebHostEnvironment environment) =>
+app.MapPost("/api/execution/start", (ExecutionStartRequest? request, ConfigManager configManager, JsonStateRepository repository, PlanExecutor executor, StateScanner scanner, IWebHostEnvironment environment) =>
 {
-    if (string.IsNullOrWhiteSpace(request?.SnapshotName))
-        return Results.BadRequest(new { Error = "Choose a snapshot to execute." });
-
-    var snapshotName = request.SnapshotName.Trim();
     var config = configManager.Load();
-    if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
-        return Results.BadRequest(new { Error = "Configure a snapshots folder before executing." });
 
-    string? snapshotPath;
-    try
-    {
-        var snapshotFolder = ResolveSnapshotsFolder(config, environment);
-        snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
-        if (snapshotPath is null)
-            return Results.NotFound(new { Error = "The selected snapshot was not found." });
-    }
-    catch (Exception ex)
-    {
-        return Results.BadRequest(new { Error = $"Invalid snapshot path: {ex.Message}" });
-    }
+    bool isInMemory = string.IsNullOrWhiteSpace(request?.SnapshotName) ||
+                      string.Equals(request.SnapshotName, "in-memory", StringComparison.OrdinalIgnoreCase) ||
+                      string.Equals(request.SnapshotName, "In-Memory Scan", StringComparison.OrdinalIgnoreCase);
 
-    try
+    PoolSnapshot? snapshot;
+    string snapshotName;
+
+    if (isInMemory)
     {
-        var snapshot = repository.LoadSnapshot(snapshotPath);
+        snapshot = scanner.GetLastSnapshot();
         if (snapshot is null)
-            return Results.NotFound(new { Error = "The selected snapshot was not found." });
+            return Results.BadRequest(new { Error = "No in-memory scan available. Run a state scan first." });
 
-        if (!executor.TryStartExecution(config, snapshot, request))
-            return Results.Conflict(new { Error = "An execution or simulation is already running." });
+        snapshotName = "In-Memory Scan";
+    }
+    else
+    {
+        snapshotName = request!.SnapshotName!.Trim();
+        if (string.IsNullOrWhiteSpace(config.SnapshotsFolder))
+            return Results.BadRequest(new { Error = "Configure a snapshots folder before executing." });
 
-        return Results.Accepted("/api/execution/status", executor.GetStatus());
+        string? snapshotPath;
+        try
+        {
+            var snapshotFolder = ResolveSnapshotsFolder(config, environment);
+            snapshotPath = ResolveSnapshotFilePath(snapshotFolder, snapshotName);
+            if (snapshotPath is null)
+                return Results.NotFound(new { Error = "The selected snapshot was not found." });
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { Error = $"Invalid snapshot path: {ex.Message}" });
+        }
+
+        try
+        {
+            snapshot = repository.LoadSnapshot(snapshotPath);
+            if (snapshot is null)
+                return Results.NotFound(new { Error = "The selected snapshot was not found." });
+        }
+        catch (InvalidDataException ex)
+        {
+            return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {ex.Message}" });
+        }
+        catch (JsonException)
+        {
+            return Results.BadRequest(new { Error = "The selected file is not a valid snapshot." });
+        }
+        catch (Exception ex)
+        {
+            return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {ex.Message}" });
+        }
     }
-    catch (InvalidDataException ex)
+
+    var effectiveRequest = (request is not null && isInMemory)
+        ? request with { SnapshotName = snapshotName }
+        : request ?? new ExecutionStartRequest(snapshotName);
+
+    string? snapshotsFolder = null;
+    if (!string.IsNullOrWhiteSpace(config.SnapshotsFolder))
     {
-        return Results.BadRequest(new { Error = $"Corrupted or invalid snapshot file: {ex.Message}" });
+        try { snapshotsFolder = ResolveSnapshotsFolder(config, environment); } catch { }
     }
-    catch (JsonException)
-    {
-        return Results.BadRequest(new { Error = "The selected file is not a valid snapshot." });
-    }
-    catch (Exception ex)
-    {
-        return Results.BadRequest(new { Error = $"Could not read the selected snapshot: {ex.Message}" });
-    }
+
+    if (!executor.TryStartExecution(config, snapshot, effectiveRequest, snapshotsFolder))
+        return Results.Conflict(new { Error = "An execution or simulation is already running." });
+
+    return Results.Accepted("/api/execution/status", executor.GetStatus());
 });
 
 app.MapGet("/api/execution/status", (PlanExecutor executor) => executor.GetStatus());
@@ -315,6 +393,40 @@ app.MapPost("/api/execution/cancel", (PlanExecutor executor) =>
         return Results.Conflict(new { Error = "There is no active execution to cancel." });
 
     return Results.Accepted("/api/execution/status", executor.GetStatus());
+});
+
+app.MapPost("/api/process/start", (ProcessStartRequest? request, ProcessCoordinator coordinator) =>
+{
+    if (!coordinator.TryStartProcess(request?.MaxFilesToCopy))
+        return Results.Conflict(new { Error = "A process, scan, or execution is already running." });
+
+    return Results.Accepted("/api/process/status", coordinator.GetStatus());
+});
+
+app.MapGet("/api/process/status", (ProcessCoordinator coordinator) => coordinator.GetStatus());
+
+app.MapPost("/api/process/cancel", (ProcessCoordinator coordinator) =>
+{
+    if (!coordinator.TryCancelProcess())
+        return Results.Conflict(new { Error = "There is no active process to cancel." });
+
+    return Results.Accepted("/api/process/status", coordinator.GetStatus());
+});
+
+app.MapGet("/api/process/plan", (ProcessCoordinator coordinator, bool? includeFiles) =>
+{
+    var plan = coordinator.GetCurrentPlan();
+    if (plan == null)
+        return Results.NotFound(new { Error = "No plan has been generated yet." });
+
+    if (includeFiles == true)
+        return Results.Ok(plan);
+
+    var strippedPlacements = plan.Placements
+        .Select(p => p with { Files = null })
+        .ToImmutableArray();
+
+    return Results.Ok(plan with { Placements = strippedPlacements });
 });
 
 static string ResolveSnapshotsFolder(AppConfig config, IWebHostEnvironment environment)
@@ -371,6 +483,6 @@ static string? ResolveSnapshotFilePath(string snapshotsFolder, string snapshotNa
 
 app.Run(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:5000");
 
-public record ScanStartRequest(string? SnapshotName);
-public record PlanRequest(string? SnapshotName, bool IncludeFiles = false);
+public record ScanStartRequest(string? SnapshotName = null, bool? SaveToDisk = null);
+public record PlanRequest(string? SnapshotName = null, bool IncludeFiles = false);
 public record SnapshotListEntry(string Name, DateTime LastModifiedUtc, long Length);

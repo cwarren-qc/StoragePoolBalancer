@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using StorageBalancer.App.Configuration;
 using StorageBalancer.App.Domain;
+using StorageBalancer.App.Subsystems.Logging;
 using StorageBalancer.App.Subsystems.Storage;
 
 namespace StorageBalancer.App.Subsystems.Scanner;
@@ -16,6 +17,7 @@ public class StateScanner
 {
     private readonly int _blockSize;
     private readonly JsonStateRepository _stateRepository;
+    private readonly IAppEventLogger? _logger;
     private readonly ConcurrentDictionary<string, VolumeScanProgress> _volumeProgress = new();
     private readonly object _statusLock = new();
     private bool _isScanning;
@@ -26,11 +28,21 @@ public class StateScanner
     private string? _error;
     private string? _snapshotName;
     private string? _snapshotPath;
+    private PoolSnapshot? _lastSnapshot;
 
-    public StateScanner(JsonStateRepository stateRepository, int blockSize = 4096)
+    public StateScanner(JsonStateRepository stateRepository, int blockSize = 4096, IAppEventLogger? logger = null)
     {
         _stateRepository = stateRepository;
         _blockSize = blockSize;
+        _logger = logger;
+    }
+
+    public PoolSnapshot? GetLastSnapshot()
+    {
+        lock (_statusLock)
+        {
+            return _lastSnapshot;
+        }
     }
 
     public ScanStatus GetStatus()
@@ -57,7 +69,7 @@ public class StateScanner
         }
     }
 
-    public bool TryStartScan(AppConfig config, string snapshotName, string snapshotPath)
+    public bool TryStartScan(AppConfig config, string snapshotName, string? snapshotPath = null)
     {
         lock (_statusLock)
         {
@@ -87,6 +99,7 @@ public class StateScanner
         }
 
         _ = RunScanAsync(config, _scanCancellation, snapshotName, snapshotPath);
+        _logger?.LogInfo("Scan", $"State scan started for snapshot '{snapshotName}'. Total volumes: {config.Volumes.Count}.");
         return true;
     }
 
@@ -98,11 +111,12 @@ public class StateScanner
                 return false;
 
             _scanCancellation.Cancel();
+            _logger?.LogWarning("Scan", "Cancellation requested for state scan.");
             return true;
         }
     }
 
-    private async Task RunScanAsync(AppConfig config, CancellationTokenSource cancellation, string snapshotName, string snapshotPath)
+    private async Task RunScanAsync(AppConfig config, CancellationTokenSource cancellation, string snapshotName, string? snapshotPath)
     {
         var cancellationToken = cancellation.Token;
         try
@@ -125,14 +139,23 @@ public class StateScanner
                 _blockSize,
                 allScannedVolumes);
 
-            _stateRepository.SaveSnapshot(snapshot, snapshotPath);
+            if (!string.IsNullOrWhiteSpace(snapshotPath))
+            {
+                _stateRepository.SaveSnapshot(snapshot, snapshotPath);
+            }
 
             lock (_statusLock)
             {
                 _isScanning = false;
+                _lastSnapshot = snapshot;
                 _scannedAt = snapshot.ScannedAt;
                 _completedAt = DateTime.UtcNow;
             }
+
+            var elapsed = _completedAt.HasValue && _startedAt.HasValue ? _completedAt.Value - _startedAt.Value : TimeSpan.Zero;
+            long totalFiles = allScannedVolumes.Sum(v => (long)v.Folders.Values.Sum(f => f.Count));
+            long totalBytes = allScannedVolumes.Sum(v => v.Folders.Values.Sum(f => f.Sum(file => file.SizeOnDisk)));
+            _logger?.LogInfo("Scan", $"State scan completed in {elapsed.TotalSeconds:F1}s. Volumes: {allScannedVolumes.Count}, Files: {totalFiles:N0}, Scanned data: {totalBytes:N0} bytes.");
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -147,6 +170,7 @@ public class StateScanner
                         : progress);
                 }
             }
+            _logger?.LogWarning("Scan", "State scan was cancelled by user.");
         }
         catch (Exception exception)
         {
@@ -163,6 +187,7 @@ public class StateScanner
                         : progress);
                 }
             }
+            _logger?.LogError("Scan", $"State scan failed: {exception.Message}", exception);
         }
         finally
         {
@@ -187,6 +212,7 @@ public class StateScanner
         {
             cancellationToken.ThrowIfCancellationRequested();
             UpdateProgress(volConfig.Alias, progress => progress with { Status = VolumeScanStatus.Scanning, CurrentPath = volConfig.MountPoint });
+            _logger?.LogInfo("Scan", $"Starting scan of volume '{volConfig.Alias}' ({volConfig.MountPoint}) on disk '{diskName}'.");
 
             var issues = new List<SnapshotIssue>();
             DirectoryInfo? scanRoot = null;
@@ -236,6 +262,8 @@ public class StateScanner
                 folders));
 
             UpdateProgress(volConfig.Alias, progress => progress with { Status = VolumeScanStatus.Complete, CurrentPath = string.Empty });
+            int volFileCount = folders.Values.Sum(f => f.Count);
+            _logger?.LogInfo("Scan", $"Completed scan of volume '{volConfig.Alias}'. Files: {volFileCount:N0}, folders: {folders.Count:N0}, issues: {issues.Count}.");
         }
 
         Console.WriteLine($"[Thread {Environment.CurrentManagedThreadId}] Finished Disk Group: {diskName}");
@@ -467,6 +495,7 @@ public class StateScanner
     private void AddIssue(string alias, List<SnapshotIssue> issues, string path, string message)
     {
         issues.Add(new SnapshotIssue(path, message));
+        _logger?.LogWarning("Scan", $"Issue on volume '{alias}' ({path}): {message}");
         UpdateProgress(alias, progress => progress with
         {
             CurrentPath = path,

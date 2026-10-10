@@ -871,6 +871,7 @@
             const execSpeed = document.getElementById('exec-speed');
             const execProgressFill = document.getElementById('exec-progress-fill');
             const execFoldersCleaned = document.getElementById('exec-folders-cleaned');
+            const execDuration = document.getElementById('exec-duration');
             const notice = document.getElementById('exec-notice');
 
             btnStart.style.display = status.isRunning ? 'none' : 'inline-flex';
@@ -883,6 +884,7 @@
             Balancer.execution.renderStatusSummary(status, {
                 subtitle,
                 pct: execPct,
+                duration: execDuration,
                 progressFill: execProgressFill,
                 transferred: execTransferred,
                 files: execFiles,

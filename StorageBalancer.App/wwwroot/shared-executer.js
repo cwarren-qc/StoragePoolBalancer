@@ -68,7 +68,8 @@ function renderVolumeDualBars(startSegments, startUsed, endSegments, endUsed, ca
             const color = volumeColors.get(item.alias) || '#89958f';
             const pctOfBar = item.size * scale;
             const isOtherClass = item.isOther ? ' is-other' : '';
-            return `<span class="provenance-segment${isOtherClass}" style="width:${pctOfBar}%; background-color:${color};" title="${escapeHtml(item.tooltip)}"></span>`;
+            const activeClass = item.isActive ? ' is-active-transfer' : '';
+            return `<span class="provenance-segment${isOtherClass}${activeClass}" style="width:${pctOfBar}%; background-color:${color};" title="${escapeHtml(item.tooltip)}"></span>`;
         }).join('');
 
         const freeBytes = Math.max(0, capacity - usedBytes);
@@ -117,11 +118,26 @@ const volumeActivityComplete = 'Complete';
 
 function renderTransferActivity(active, action, dotColor) {
     const speedText = active?.throughputBps > 0 ? `(${window.Balancer.formatBytes(active.throughputBps)}/s)` : '';
+    const fileSize = Number(active?.fileSize ?? active?.FileSize ?? 0);
+    const bytesCopied = Number(active?.bytesCopied ?? active?.BytesCopied ?? 0);
+    const pct = fileSize > 0 ? Math.min(100, Math.max(0, (bytesCopied / fileSize) * 100)) : (bytesCopied > 0 ? 100 : 0);
+    const progressText = fileSize > 0
+        ? `${window.Balancer.formatBytes(bytesCopied)} / ${window.Balancer.formatBytes(fileSize)} (${pct.toFixed(0)}%)`
+        : (bytesCopied > 0 ? `${window.Balancer.formatBytes(bytesCopied)}` : '0 B (0%)');
+
     return `
-        <div style="display:flex; align-items:center; gap:6px; overflow:hidden;" title="${window.Balancer.escapeHtml(active?.fileName || '')}">
-            <span class="status-dot dot-scan" style="background:${dotColor}; flex-shrink:0;"></span>
-            <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px;">
-                <strong>${window.Balancer.escapeHtml(action)}:</strong> "${window.Balancer.escapeHtml(active?.fileName || '')}" <span style="color:var(--muted); font-size:11px;">${speedText}</span>
+        <div style="display:flex; flex-direction:column; gap:4px; overflow:hidden;" title="${window.Balancer.escapeHtml(active?.fileName || '')}">
+            <div style="display:flex; align-items:center; gap:6px; overflow:hidden;">
+                <span class="status-dot dot-scan" style="background:${dotColor}; flex-shrink:0;"></span>
+                <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px;">
+                    <strong>${window.Balancer.escapeHtml(action)}:</strong> "${window.Balancer.escapeHtml(active?.fileName || '')}" <span style="color:var(--muted); font-size:11px;">${speedText}</span>
+                </div>
+            </div>
+            <div style="display:flex; align-items:center; gap:6px; padding-left:14px;">
+                <div style="height:5px; flex:1; background:#dbe1d9; border-radius:3px; overflow:hidden; position:relative;">
+                    <div style="width:${pct}%; height:100%; background:${dotColor}; border-radius:3px; transition:width 0.25s ease;"></div>
+                </div>
+                <span style="font-size:10px; color:var(--muted); font-variant-numeric:tabular-nums; flex-shrink:0; font-weight:600;">${window.Balancer.escapeHtml(progressText)}</span>
             </div>
         </div>
     `;
@@ -216,6 +232,19 @@ window.Balancer.execution = {
         return await res.json();
     },
 
+    formatDuration(startedAt, completedAt) {
+        if (startedAt) {
+            const start = new Date(startedAt).getTime();
+            const end = completedAt ? new Date(completedAt).getTime() : Date.now();
+            const totalSec = Math.max(0, Math.floor((end - start) / 1000));
+            const hours = Math.floor(totalSec / 3600);
+            const minutes = Math.floor((totalSec % 3600) / 60);
+            const seconds = totalSec % 60;
+            return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+        }
+        return '00:00:00';
+    },
+
     renderStatusSummary(status, elements = {}, options = {}) {
         if (!status) return;
         const formatBytes = window.Balancer.formatBytes;
@@ -224,6 +253,7 @@ window.Balancer.execution = {
         const {
             subtitle,
             pct: execPct,
+            duration: execDuration,
             progressFill: execProgressFill,
             transferred: execTransferred,
             files: execFiles,
@@ -232,6 +262,11 @@ window.Balancer.execution = {
             summaryBar,
             notice
         } = elements;
+
+        const durationEl = execDuration || document.getElementById('exec-duration');
+        if (durationEl) {
+            durationEl.textContent = this.formatDuration(status.startedAt, status.completedAt);
+        }
 
         const isCompleted = Boolean(status.completedAt || status.phase === 'Completed');
 
@@ -284,7 +319,15 @@ window.Balancer.execution = {
                 execFoldersCleaned.textContent = status.folderCleanup ? (status.folderCleanup.cleanedCount || 0).toLocaleString() : '-';
             }
 
-            if (status.error) {
+            const isCancelled = status.phase === 'Cancelled' || status.isCancellationRequested || (status.error && status.error.toLowerCase().includes('cancelled'));
+
+            if (isCancelled) {
+                if (subtitle) subtitle.textContent = isSimulation ? 'Simulation cancelled by user' : 'Execution cancelled by user';
+                if (notice) {
+                    notice.textContent = isSimulation ? 'Simulation was cancelled by the user.' : 'File balancing execution was cancelled by the user.';
+                    notice.className = 'notice info';
+                }
+            } else if (status.error) {
                 if (subtitle) subtitle.textContent = isSimulation ? 'Simulation stopped with error' : 'Execution stopped with error';
                 if (notice) {
                     notice.textContent = status.error;
@@ -340,14 +383,20 @@ window.Balancer.execution = {
         const colors = volumeColors || window.Balancer.getVolumeColorMap(volumes);
         const activeTransfers = status.activeTransfers || [];
 
-        // Build active transfers lookup by volume
+        // Build active transfer pairs ("src->tgt") and active transfer lookup by volume
+        const activePairs = new Set();
         const transferByVol = new Map();
         activeTransfers.forEach(t => {
-            if (t.sourceVolume && !transferByVol.has(t.sourceVolume)) {
-                transferByVol.set(t.sourceVolume, { ...t, role: volumeActivityReading });
+            const src = t.sourceVolume || t.SourceVolume;
+            const tgt = t.targetVolume || t.TargetVolume;
+            if (src && tgt) {
+                activePairs.add(`${src}->${tgt}`);
             }
-            if (t.targetVolume && !transferByVol.has(t.targetVolume)) {
-                transferByVol.set(t.targetVolume, { ...t, role: volumeActivityWriting });
+            if (src && !transferByVol.has(src)) {
+                transferByVol.set(src, { ...t, role: volumeActivityReading });
+            }
+            if (tgt && !transferByVol.has(tgt)) {
+                transferByVol.set(tgt, { ...t, role: volumeActivityWriting });
             }
         });
 
@@ -379,11 +428,15 @@ window.Balancer.execution = {
             }
             (vol.outgoingRemaining || []).forEach(seg => {
                 if (seg.remainingBytes > 0) {
+                    const isTransferActive = activePairs.has(`${vol.alias}->${seg.alias}`);
                     startSegments.push({
                         alias: seg.alias,
                         size: seg.remainingBytes,
                         isOther: false,
-                        tooltip: `${formatBytes(seg.remainingBytes)} waiting to move to ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
+                        isActive: isTransferActive,
+                        tooltip: isTransferActive
+                            ? `[TRANSFERRING NOW] Moving to ${seg.alias}: ${formatBytes(seg.remainingBytes)} remaining (of ${formatBytes(seg.totalBytes)})`
+                            : `${formatBytes(seg.remainingBytes)} waiting to move to ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
                     });
                 }
             });
@@ -409,11 +462,15 @@ window.Balancer.execution = {
             }
             (vol.incomingRemaining || []).forEach(seg => {
                 if (seg.remainingBytes > 0) {
+                    const isTransferActive = activePairs.has(`${seg.alias}->${vol.alias}`);
                     endSegments.push({
                         alias: seg.alias,
                         size: seg.remainingBytes,
                         isOther: false,
-                        tooltip: `${formatBytes(seg.remainingBytes)} waiting to move in from ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
+                        isActive: isTransferActive,
+                        tooltip: isTransferActive
+                            ? `[TRANSFERRING NOW] Moving in from ${seg.alias}: ${formatBytes(seg.remainingBytes)} remaining (of ${formatBytes(seg.totalBytes)})`
+                            : `${formatBytes(seg.remainingBytes)} waiting to move in from ${seg.alias} (of ${formatBytes(seg.totalBytes)})`
                     });
                 }
             });
@@ -426,7 +483,11 @@ window.Balancer.execution = {
             const isAllDone = (vol.outgoingRemaining || []).every(s => s.remainingBytes <= 0) &&
                               (vol.incomingRemaining || []).every(s => s.remainingBytes <= 0);
 
-            if (active) {
+            if (status.phase === 'Cancelled' || status.isCancellationRequested || vol.status === 'Cancelled') {
+                activityHtml = `<span class="state-text"><span class="status-dot dot-wait"></span>Cancelled</span>`;
+            } else if (status.phase === 'Failed' || vol.status === 'Failed') {
+                activityHtml = `<span class="state-text" style="color:var(--error,#b00020);"><span class="status-dot dot-error"></span>Failed</span>`;
+            } else if (active) {
                 const config = volumeActivityConfigs.find(c => c.name === active.role);
                 activityHtml = config ? config.render(active) : `<span class="state-text">${escapeHtml(active.role)}</span>`;
             } else if (vol.status === volumeActivityCleaningFolders) {
@@ -474,7 +535,7 @@ window.Balancer.execution = {
                             </div>
                         </div>
                     </td>
-                    <td style="max-width:260px; overflow:hidden;">
+                    <td style="min-width:240px; max-width:340px; overflow:hidden;">
                         ${activityHtml}
                     </td>
                     <td style="text-align:right;">
@@ -621,6 +682,10 @@ window.Balancer.execution = {
                             <span class="exec-stat-value" id="exec-pct">0%</span>
                         </div>
                         <div class="exec-stat">
+                            <span class="exec-stat-label">Duration</span>
+                            <span class="exec-stat-value" id="exec-duration">00:00:00</span>
+                        </div>
+                        <div class="exec-stat">
                             <span class="exec-stat-label">Transferred</span>
                             <span class="exec-stat-value" id="exec-transferred">0 B / 0 B</span>
                         </div>
@@ -650,7 +715,7 @@ window.Balancer.execution = {
                                 <th style="width: 110px;" title="Volume and physical disk participating in balancing">Volume</th>
                                 <th style="width: 80px; text-align:right;" title="Usable capacity of the volume">Capacity</th>
                                 <th style="width: auto; min-width: 260px; padding-left: 12px; padding-right: 12px;" title="Visual progression of outgoing data (-OUT) and incoming data (+IN) absorbing into the volume">START (-OUT) vs END (+IN)</th>
-                                <th style="width: 240px;" title="Live disk reading or writing activity with throughput">Current Activity</th>
+                                <th style="width: 280px;" title="Live disk reading or writing activity with throughput">Current Activity</th>
                                 <th style="width: 140px; text-align:right;" title="Remaining data to be moved out (-OUT) and moved in (+IN)">Data Remaining</th>
                                 <th style="width: 90px; text-align:right;" title="Remaining files to be moved out (-OUT) and moved in (+IN)">Files Remaining</th>
                             </tr>
